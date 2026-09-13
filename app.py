@@ -483,6 +483,24 @@ def build_sheet(lines, remarks, date_str, prepared, checked, verified,
     buf = io.BytesIO(); wb.save(buf); return buf.getvalue()
 
 
+
+def _n(x):
+    """Plain number, no trailing zeros, no thousands separator."""
+    return f"{float(x):.7f}".rstrip("0").rstrip(".") or "0"
+
+
+def make_txt(lines, prefix="SML") -> bytes:
+    """One line per stock movement, no header, no quotes:
+        PREFIX,BARCODE,COST,QTY
+    Outer side carries the negative qty, single side the positive."""
+    out = []
+    for ln in lines:
+        (obc, _, _, oqty, ocost, _), (sbc, _, _, sqty, scost, _) = ln.rows()
+        out.append(f"{prefix},{obc},{_n(ocost)},{_n(oqty)}")
+        out.append(f"{prefix},{sbc},{_n(scost)},{_n(sqty)}")
+    return ("\n".join(out) + "\n").encode("ascii", "ignore")
+
+
 def validate(row, master_idx, neg_map, drift_tol=15.0):
     out = []
     dr = row.get("cost_drift_pct")
@@ -615,6 +633,8 @@ with st.sidebar:
     prepared = st.text_input("Prepared by", "SWASTHIK")
     checked = st.text_input("Checked by", "IRSHAD")
     verified = st.text_input("Verified by", "THALLATH")
+    txt_prefix = st.text_input("Import file prefix", "SML",
+                               help="First field of every line in the .txt")
     st.header("3. Matching")
     br_thresh = st.slider("Bundle break strictness", 0.70, 1.00, 0.80, 0.01,
                           help="Higher = fewer but safer matches")
@@ -824,66 +844,60 @@ def candidates_tab(neg, master, master_idx, neg_map,
         vals = cand.loc[clean_mask, "neg_val"].abs()
         vmax = float(vals.max()) if len(vals) else 0.0
 
-        q1, q2, q3 = st.columns([2, 1.2, 1.2])
+        # Selection is computed from these controls every run — no widget holds
+        # a stale copy of the ticks, so what you see is always what will build.
+        q1, q2 = st.columns([2, 2])
         thresh = q1.number_input(
-            "Only select pairs worth at least (AED)", min_value=0.0,
-            max_value=max(vmax, 1.0), value=0.0, step=5.0,
-            help="0 selects every unblocked pair. Raise it to skip the small ones.")
-        q2.write(""); q3.write("")
-        if q2.button("Apply value filter", use_container_width=True):
-            cand["use"] = clean_mask & (cand["neg_val"].abs() >= thresh)
-            st.session_state["cand"] = cand
-            st.session_state["sel_version"] = st.session_state.get("sel_version", 0) + 1
-            st.session_state["batch"] = 0
-            st.rerun(scope="fragment")
-        if q3.button("Clear all", use_container_width=True):
-            cand["use"] = False
-            st.session_state["cand"] = cand
-            st.session_state["sel_version"] = st.session_state.get("sel_version", 0) + 1
-            st.rerun(scope="fragment")
+            "Only take pairs worth at least (AED)", min_value=0.0,
+            max_value=max(vmax, 1.0), value=0.0, step=5.0, key="thresh",
+            help="0 takes every unblocked pair. Raise it to skip the small ones.")
+        include_blocked = q2.checkbox(
+            "Include pairs with blockers", False, key="incl_blocked",
+            help="Cost drift, short source stock, missing barcode. "
+                 "Only tick this if you have checked them yourself.")
+
+        base = cand if include_blocked else cand[clean_mask]
+        eligible = base[base["neg_val"].abs() >= thresh]
+
+        cand["use"] = cand.index.isin(eligible.index)
+        st.session_state["cand"] = cand
 
         picked = cand.loc[cand["use"], "neg_val"].abs()
-        st.caption(
-            f"Sorted highest value first. **{len(picked)} pairs ticked** worth "
-            f"{picked.sum():,.0f} AED — that is {math.ceil(len(picked)/PAIRS_PER_FILE)} "
-            f"sheet(s) of up to {PAIRS_PER_FILE} pairs each, filled in value order. "
-            f"Over-clear notes are normal overshoot, not blockers."
+        per = st.session_state.get("per_sheet", PAIRS_PER_FILE)
+        st.success(
+            f"**{len(picked)} pairs selected**, {picked.sum():,.0f} AED — "
+            f"{math.ceil(len(picked) / max(per, 1))} sheet(s) at {per} pairs each, "
+            f"filled highest value first."
         )
 
-        BASIC = ["use", "neg_desc", "neg_qty", "neg_val", "par_desc", "conv",
+        BASIC = ["neg_desc", "neg_qty", "neg_val", "par_desc", "conv",
                  "outers_needed", "cost_drift_pct", "problems"]
-        extra_opts = [c for c in cand.columns if c not in BASIC]
+        extra_opts = [c for c in cand.columns
+                      if c not in BASIC + ["use", "blocked"]]
         show_extra = st.multiselect("Add columns", extra_opts, default=[],
-                                    help="The preview stays compact by default")
+                                    key="extra_cols")
         cols = [c for c in BASIC if c in cand.columns] + show_extra
 
-        with st.form("tick_form", border=False):
-            st.caption("Tick freely — nothing reloads until you press Apply. "
-                       "Check the physical shelf first.")
-            edited = st.data_editor(
-                cand[cols], use_container_width=True, hide_index=True, height=380,
-                column_config={
-                    "use": st.column_config.CheckboxColumn("✓", width="small"),
-                    "neg_desc": st.column_config.TextColumn("Negative item", width="large"),
-                    "par_desc": st.column_config.TextColumn("Outer / source", width="large"),
-                    "neg_qty": st.column_config.NumberColumn("Neg qty", width="small"),
-                    "neg_val": st.column_config.NumberColumn("Neg value", format="%.2f",
-                                                             width="small"),
-                    "conv": st.column_config.NumberColumn("Conv", width="small"),
-                    "outers_needed": st.column_config.NumberColumn("Outers", width="small"),
-                    "cost_drift_pct": st.column_config.NumberColumn(
-                        "Drift %", format="%.0f%%", width="small"),
-                    "problems": st.column_config.TextColumn("Problems", width="medium"),
-                },
-                disabled=[c for c in cols if c != "use"],
-                key=f"cand_editor_{st.session_state.get('sel_version', 0)}",
-            )
-            applied = st.form_submit_button("Apply ticks", type="primary")
+        view = st.radio("Show", ["Taken", "Left out", "Everything"],
+                        horizontal=True, key="view_mode")
+        shown = (cand[cand["use"]] if view == "Taken"
+                 else cand[~cand["use"]] if view == "Left out" else cand)
 
-        if applied:
-            cand["use"] = edited["use"].values
-            st.session_state["cand"] = cand
-            st.session_state["batch"] = 0
+        st.dataframe(
+            shown[cols], use_container_width=True, hide_index=True, height=380,
+            column_config={
+                "neg_desc": st.column_config.TextColumn("Negative item", width="large"),
+                "par_desc": st.column_config.TextColumn("Outer / source", width="large"),
+                "neg_qty": st.column_config.NumberColumn("Neg qty", width="small"),
+                "neg_val": st.column_config.NumberColumn("Neg value", format="%.2f",
+                                                         width="small"),
+                "conv": st.column_config.NumberColumn("Conv", width="small"),
+                "outers_needed": st.column_config.NumberColumn("Outers", width="small"),
+                "cost_drift_pct": st.column_config.NumberColumn(
+                    "Drift %", format="%.0f%%", width="small"),
+                "problems": st.column_config.TextColumn("Notes", width="medium"),
+            })
+
     elif cand is not None:
         st.warning("No candidates. Loosen the sliders in the sidebar and run again.")
 
@@ -958,7 +972,7 @@ with tabV:
 
 # ---------- Build ----------
 @st.fragment
-def build_tab(adj_date, prepared, checked, verified):
+def build_tab(adj_date, prepared, checked, verified, txt_prefix):
     cand = st.session_state.get("cand")
     manual = st.session_state.get("manual", [])
     pool = []
@@ -995,13 +1009,67 @@ def build_tab(adj_date, prepared, checked, verified):
             pool = sorted(pool, key=lambda r: (r.get("serial") or 1e9))
 
         remarks = st.text_input("Remarks", "OUTER BREAK FOR NEGATIVE STOCK")
+        per = st.number_input("Pairs per sheet", min_value=1, max_value=60,
+                              value=PAIRS_PER_FILE, step=1, key="per_sheet",
+                              help="11 pairs = 22 rows. Pair 12 starts a new sheet.")
+        st.caption(f"{len(pool)} pairs → {math.ceil(len(pool)/int(per))} sheets")
+
+        if st.button(f"Generate ALL {math.ceil(len(pool)/int(per))} sheets (zip)",
+                     type="primary", use_container_width=True):
+            zbuf = io.BytesIO()
+            alltxt, work, bad = [], [], 0
+            with zipfile.ZipFile(zbuf, "w", zipfile.ZIP_DEFLATED) as z:
+                for i in range(0, len(pool), int(per)):
+                    rows_ = pool[i:i + int(per)]
+                    lns = [Line(r["par_bc"], r["par_desc"],
+                                "OFR" if r["conv"] != 1 else "PCS",
+                                r["outers_needed"], r["par_cost"],
+                                r["neg_bc"], r["neg_desc"], "PCS", r["conv"])
+                           for r in rows_]
+                    k = i // int(per) + 1
+                    z.writestr(f"ADJ_{k:03d}.xlsx",
+                               build_sheet(lns, remarks, adj_date, prepared,
+                                           checked, verified, live=live_mode))
+                    t = make_txt(lns, txt_prefix)
+                    z.writestr(f"ADJ_{k:03d}.txt", t)
+                    alltxt.append(t.decode())
+                    for ln in lns:
+                        a_, b_ = ln.rows()
+                        work.append({"FILE": f"ADJ_{k:03d}",
+                                     "OUTER BARCODE": a_[0], "SINGLE BARCODE": b_[0],
+                                     "OUTER ITEM": a_[1], "SINGLE ITEM": b_[1],
+                                     "CONV": ln.conv, "OUTER QTY": a_[3],
+                                     "SINGLE QTY": b_[3], "COST OUTER": a_[4],
+                                     "COST SINGLE": b_[4], "OUTER VALUE": a_[5],
+                                     "SINGLE VALUE": b_[5],
+                                     "DIFFERENCE": round(a_[5] + b_[5], 2)})
+                        bad += abs(a_[5] + b_[5]) > 0.01
+                z.writestr("ALL_LINES.txt", "".join(alltxt))
+                wbuf = io.BytesIO()
+                wdf = pd.DataFrame(work)
+                for c in ("OUTER BARCODE", "SINGLE BARCODE"):
+                    wdf[c] = wdf[c].astype(str)
+                with pd.ExcelWriter(wbuf, engine="openpyxl") as xw:
+                    wdf.to_excel(xw, sheet_name="WORKING", index=False)
+                z.writestr("WORKING_ALL.xlsx", wbuf.getvalue())
+            if bad:
+                st.error(f"{bad} pairs do not net to zero")
+            else:
+                st.success(f"{len(pool)} pairs in "
+                           f"{math.ceil(len(pool)/int(per))} sheets, all totals 0.00")
+            st.download_button("⬇ Download everything (zip)", zbuf.getvalue(),
+                               f"ADJUSTMENTS_{adj_date.replace('-', '')}.zip",
+                               "application/zip", use_container_width=True)
+
+        st.divider()
+        st.caption("Or build one sheet at a time to print and hand over:")
         r1, r2, r3 = st.columns([1, 1, 2])
         start_at = r1.number_input("Start at serial", min_value=1,
                                    max_value=max(len(pool), 1),
                                    value=min(done + 1, max(len(pool), 1)))
         count = r2.number_input("How many pairs", min_value=1,
-                                max_value=PAIRS_PER_FILE,
-                                value=min(PAIRS_PER_FILE,
+                                max_value=int(per),
+                                value=min(int(per),
                                           max(len(pool) - int(start_at) + 1, 1)))
         r3.write(""); r3.write("")
         gen = r3.button(f"Generate serial {int(start_at)}–"
@@ -1033,6 +1101,7 @@ def build_tab(adj_date, prepared, checked, verified):
                              "DESCRIPTION": b_[1], "UNIT": b_[2],
                              "QTY": b_[3], "COST": b_[4], "VALUE": b_[5]})
             pdf = pd.DataFrame(prev)
+            st.session_state["last_txt"] = make_txt(lines, txt_prefix)
             st.session_state["last_sheet"] = (n, data, pdf,
                                               round(pdf["VALUE"].sum(), 2))
             st.session_state["batch"] = max(done, s0 + len(lines))
@@ -1052,18 +1121,23 @@ def build_tab(adj_date, prepared, checked, verified):
                     "DESCRIPTION": st.column_config.TextColumn(width="large"),
                     "VALUE": st.column_config.NumberColumn(format="%.2f"),
                 })
-            st.download_button(f"⬇ Download ADJ_{n:03d}.xlsx", data,
-                               f"ADJ_{n:03d}.xlsx",
+            d1, d2 = st.columns(2)
+            d1.download_button(f"⬇ ADJ_{n:03d}.xlsx", data, f"ADJ_{n:03d}.xlsx",
                                "application/vnd.openxmlformats-officedocument."
-                               "spreadsheetml.sheet",
+                               "spreadsheetml.sheet", use_container_width=True)
+            txt = st.session_state.get("last_txt", b"")
+            d2.download_button(f"⬇ ADJ_{n:03d}.txt (iTrade import)", txt,
+                               f"ADJ_{n:03d}.txt", "text/plain",
                                use_container_width=True)
+            with st.expander("Preview the import file"):
+                st.code(txt.decode(), language="text")
 
 with tab2:
     candidates_tab(neg, master, master_idx, neg_map,
                    br_thresh, sw_lo, sw_hi, price_tol, drift_tol)
 
 with tab3:
-    build_tab(adj_date, prepared, checked, verified)
+    build_tab(adj_date, prepared, checked, verified, txt_prefix)
 
 
 # ---------- Manual ----------
