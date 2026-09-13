@@ -6,7 +6,6 @@ Streamlit app.  Run locally:  streamlit run app.py
 import io
 import math
 import re
-import zipfile
 from collections import defaultdict
 from dataclasses import dataclass
 
@@ -460,9 +459,8 @@ class Line:
                 (self.sng_bc, self.sng_desc, self.sng_unit, sq, sc, sv)]
 
 
-def build_sheet(lines, remarks, date_str, prepared, checked, verified,
-                live=True) -> bytes:
-    wb = Workbook(); ws = wb.active; ws.title = "ADJUSTMENT"
+def write_adjustment(ws, lines, remarks, date_str, prepared, checked, verified,
+                     live=True):
     ncol = len(HEADERS); last = get_column_letter(ncol)
     for i, w in enumerate(WIDTHS, start=1):
         ws.column_dimensions[get_column_letter(i)].width = w
@@ -583,9 +581,27 @@ def build_sheet(lines, remarks, date_str, prepared, checked, verified,
     ws.page_setup.fitToWidth = 1
     ws.sheet_properties.pageSetUpPr.fitToPage = True
     ws.freeze_panes = "A7"
+    return ws
 
+
+def build_sheet(lines, remarks, date_str, prepared, checked, verified,
+                live=True) -> bytes:
+    """One adjustment as a standalone workbook."""
+    wb = Workbook(); ws = wb.active; ws.title = "ADJUSTMENT"
+    write_adjustment(ws, lines, remarks, date_str, prepared, checked,
+                     verified, live)
     buf = io.BytesIO(); wb.save(buf); return buf.getvalue()
 
+
+def build_workbook(chunks, remarks, date_str, prepared, checked, verified,
+                   live=True) -> bytes:
+    """Every adjustment in one workbook, one worksheet per sheet."""
+    wb = Workbook(); wb.remove(wb.active)
+    for i, lines in enumerate(chunks, start=1):
+        ws = wb.create_sheet(f"ADJ_{i:03d}")
+        write_adjustment(ws, lines, remarks, date_str, prepared, checked,
+                         verified, live)
+    buf = io.BytesIO(); wb.save(buf); return buf.getvalue()
 
 
 def _n(x):
@@ -873,6 +889,33 @@ master_idx = master.set_index("Item Barcode").to_dict("index")
 neg_map = dict(zip(neg["bc"], neg["qty"]))
 
 store = get_store()
+if store is not None and neg is not None:
+    import hashlib
+    sig = hashlib.md5(
+        (str(len(neg)) + str(round(float(neg["val"].sum()), 2))
+         + f_neg.name + str(f_neg.size if hasattr(f_neg, "size") else "")
+         ).encode()).hexdigest()
+    if st.session_state.get("snap_sig") != sig:
+        by = (neg.groupby("category", dropna=False)
+              .agg(lines=("val", "size"), qty=("qty", "sum"),
+                   value=("val", "sum")).reset_index())
+        okS, sid = store.save_snapshot(
+            totals={"lines": int(len(neg)),
+                    "value": round(float(neg["val"].sum()), 2),
+                    "units": round(float(neg["qty"].sum()), 3),
+                    "categories": int(neg["category"].nunique()),
+                    "not_in_master": int((~neg["bc"].isin(
+                        set(master["Item Barcode"]))).sum())},
+            by_category=[{"category": r["category"], "lines": int(r["lines"]),
+                          "qty": round(float(r["qty"]), 3),
+                          "value": round(float(r["value"]), 2)}
+                         for r in by.to_dict("records")],
+            source={"negative_file": getattr(f_neg, "name", ""),
+                    "master_file": getattr(f_master, "name", "")})
+        st.session_state["snap_sig"] = sig
+        if okS:
+            st.session_state["snapshot_id"] = sid
+
 tab1, tab2, tabV, tab3, tab4, tabA = st.tabs(
     ["Overview", "Candidates", "Verify", "Build sheets", "Manual pair", "Archive"]
 )
@@ -1557,76 +1600,95 @@ def build_tab(adj_date, prepared, checked, verified, txt_prefix, store):
                               help="11 pairs = 22 rows. Pair 12 starts a new sheet.")
         st.caption(f"{len(pool)} pairs → {math.ceil(len(pool)/int(per))} sheets")
 
-        if st.button(f"Generate ALL {math.ceil(len(pool)/int(per))} sheets (zip)",
+        if st.button(f"Generate all {math.ceil(len(pool)/int(per))} sheets",
                      type="primary", use_container_width=True):
-            zbuf = io.BytesIO()
-            alltxt, work, bad = [], [], 0
-            txt_net, txt_rows = 0.0, []
-            with zipfile.ZipFile(zbuf, "w", zipfile.ZIP_DEFLATED) as z:
-                for i in range(0, len(pool), int(per)):
-                    rows_ = pool[i:i + int(per)]
-                    lns = [Line(r["par_bc"], r["par_desc"],
-                                "OFR" if r["conv"] != 1 else "PCS",
-                                r["outers_needed"], r["par_cost"],
-                                r["neg_bc"], r["neg_desc"], "PCS", r["conv"])
-                           for r in rows_]
-                    k = i // int(per) + 1
-                    z.writestr(f"ADJ_{k:03d}.xlsx",
-                               build_sheet(lns, remarks, adj_date, prepared,
-                                           checked, verified, live=live_mode))
-                    t, rep = make_txt(lns, txt_prefix)
-                    z.writestr(f"ADJ_{k:03d}.txt", t)
-                    alltxt.append(t.decode())
-                    txt_net += rep["net"]
-                    txt_rows += rep["rows"]
-                    for ln in lns:
-                        a_, b_ = ln.rows()
-                        work.append({"FILE": f"ADJ_{k:03d}",
-                                     "OUTER BARCODE": a_[0], "SINGLE BARCODE": b_[0],
-                                     "OUTER ITEM": a_[1], "SINGLE ITEM": b_[1],
-                                     "CONV": ln.conv, "OUTER QTY": a_[3],
-                                     "SINGLE QTY": b_[3], "COST OUTER": a_[4],
-                                     "COST SINGLE": b_[4], "OUTER VALUE": a_[5],
-                                     "SINGLE VALUE": b_[5],
-                                     "DIFFERENCE": round(a_[5] + b_[5], 2)})
-                        bad += abs(a_[5] + b_[5]) > 0.01
-                z.writestr("ALL_LINES.txt", "".join(alltxt))
-                wbuf = io.BytesIO()
-                wdf = pd.DataFrame(work)
-                for c in ("OUTER BARCODE", "SINGLE BARCODE"):
-                    wdf[c] = wdf[c].astype(str)
-                with pd.ExcelWriter(wbuf, engine="openpyxl") as xw:
-                    wdf.to_excel(xw, sheet_name="WORKING", index=False)
-                z.writestr("WORKING_ALL.xlsx", wbuf.getvalue())
-            if bad:
-                st.error(f"{bad} pairs do not net to zero")
-            else:
-                st.success(f"{len(pool)} pairs in "
-                           f"{math.ceil(len(pool)/int(per))} sheets, all totals 0.00")
-            if txt_rows:
-                st.warning(f"Import files carry a rounding residual of "
-                           f"{txt_net:+.2f} AED across {len(txt_rows)} pairs "
-                           f"(uneven conversions). The Excel sheets are exact.")
-                with st.expander("Which pairs, and by how much"):
-                    st.dataframe(pd.DataFrame(txt_rows).sort_values(
-                        "Off by (AED)", key=abs, ascending=False),
-                        use_container_width=True, hide_index=True)
-            else:
-                st.caption("Import files net to exactly 0.00 as well.")
-            st.session_state["last_zip"] = zbuf.getvalue()
-            st.download_button("⬇ Download everything (zip)", zbuf.getvalue(),
-                               f"ADJUSTMENTS_{adj_date.replace('-', '')}.zip",
-                               "application/zip", use_container_width=True)
+            chunks, work, bad = [], [], 0
+            txt_net, txt_rows, alltxt = 0.0, [], []
+            for i in range(0, len(pool), int(per)):
+                rows_ = pool[i:i + int(per)]
+                lns = [Line(r["par_bc"], r["par_desc"],
+                            "OFR" if r["conv"] != 1 else "PCS",
+                            r["outers_needed"], r["par_cost"],
+                            r["neg_bc"], r["neg_desc"], "PCS", r["conv"])
+                       for r in rows_]
+                chunks.append(lns)
+                t, rep = make_txt(lns, txt_prefix)
+                alltxt.append(t.decode())
+                txt_net += rep["net"]; txt_rows += rep["rows"]
+                k = i // int(per) + 1
+                for ln in lns:
+                    a_, b_ = ln.rows()
+                    work.append({"FILE": f"ADJ_{k:03d}",
+                                 "OUTER BARCODE": a_[0], "SINGLE BARCODE": b_[0],
+                                 "OUTER ITEM": a_[1], "SINGLE ITEM": b_[1],
+                                 "CONV": ln.conv, "OUTER QTY": a_[3],
+                                 "SINGLE QTY": b_[3], "COST OUTER": a_[4],
+                                 "COST SINGLE": b_[4], "OUTER VALUE": a_[5],
+                                 "SINGLE VALUE": b_[5],
+                                 "DIFFERENCE": round(a_[5] + b_[5], 2)})
+                    bad += abs(a_[5] + b_[5]) > 0.01
 
-        if store and st.session_state.get("last_zip"):
-            if st.button("💾 Save this batch to the database",
-                         use_container_width=True):
+            wdf = pd.DataFrame(work)
+            for c in ("OUTER BARCODE", "SINGLE BARCODE"):
+                wdf[c] = wdf[c].astype(str)
+            wbuf = io.BytesIO()
+            with pd.ExcelWriter(wbuf, engine="openpyxl") as xw:
+                wdf.to_excel(xw, sheet_name="WORKING", index=False)
+
+            st.session_state["bulk"] = {
+                "xlsx": build_workbook(chunks, remarks, adj_date, prepared,
+                                       checked, verified, live=live_mode),
+                "txt": "".join(alltxt).encode("ascii", "ignore"),
+                "working": wbuf.getvalue(),
+                "sheets": len(chunks), "pairs": len(pool),
+                "bad": bad, "net": round(txt_net, 2), "rows": txt_rows,
+            }
+
+        bulk = st.session_state.get("bulk")
+        if bulk:
+            if bulk["bad"]:
+                st.error(f"{bulk['bad']} pairs do not net to zero")
+            else:
+                st.success(f"{bulk['pairs']} pairs in {bulk['sheets']} sheets, "
+                           f"every total 0.00")
+            if bulk["rows"]:
+                st.warning(f"Import file residual {bulk['net']:+.2f} AED across "
+                           f"{len(bulk['rows'])} pair(s) — uneven conversions. "
+                           f"The Excel sheets are exact.")
+                with st.expander("Which pairs, and by how much"):
+                    st.dataframe(pd.DataFrame(bulk["rows"]),
+                                 use_container_width=True, hide_index=True)
+
+            stamp = adj_date.replace("-", "")
+            g1, g2, g3 = st.columns(3)
+            g1.download_button(
+                f"⬇ All {bulk['sheets']} sheets — one Excel",
+                bulk["xlsx"], f"ADJUSTMENTS_{stamp}.xlsx",
+                "application/vnd.openxmlformats-officedocument."
+                "spreadsheetml.sheet", use_container_width=True)
+            g2.download_button(
+                "⬇ All lines — one txt", bulk["txt"],
+                f"ADJUSTMENTS_{stamp}.txt", "text/plain",
+                use_container_width=True)
+            g3.download_button(
+                "⬇ Working file", bulk["working"],
+                f"WORKING_{stamp}.xlsx",
+                "application/vnd.openxmlformats-officedocument."
+                "spreadsheetml.sheet", use_container_width=True)
+
+            with st.expander("Preview the combined import file"):
+                st.code(bulk["txt"].decode(), language=None)
+
+            if store and st.button("💾 Save this batch to the database",
+                                   use_container_width=True):
                 ok, res = store.save_batch(
-                    label=f"{adj_date} · {len(pool)} pairs",
-                    files={f"ADJUSTMENTS_{adj_date.replace('-', '')}.zip":
-                           st.session_state["last_zip"]},
-                    meta={"remarks": remarks, "pairs": len(pool),
-                          "per_sheet": int(per)},
+                    label=f"{adj_date} · {bulk['pairs']} pairs · "
+                          f"{bulk['sheets']} sheets",
+                    files={f"ADJUSTMENTS_{stamp}.xlsx": bulk["xlsx"],
+                           f"ADJUSTMENTS_{stamp}.txt": bulk["txt"],
+                           f"WORKING_{stamp}.xlsx": bulk["working"]},
+                    meta={"remarks": remarks, "pairs": bulk["pairs"],
+                          "sheets": bulk["sheets"], "per_sheet": int(per)},
                     run_id=st.session_state.get("run_id"))
                 (st.success if ok else st.error)(
                     "Saved." if ok else f"Not saved: {res}")
@@ -1755,7 +1817,85 @@ with tabA:
         ok, msg = store.check()
         (st.success if ok else st.error)(msg)
         if ok:
-            sub1, sub2 = st.tabs(["Saved batches", "Run history"])
+            sub0, sub1, sub2 = st.tabs(["History by date", "Saved batches",
+                                        "Run history"])
+
+            with sub0:
+                snaps = store.list_snapshots()
+                if not snaps:
+                    st.caption("No snapshots yet. One is saved automatically "
+                               "each time you upload a negative stock file.")
+                else:
+                    hist = pd.DataFrame([{
+                        "When": s_["at"].strftime("%Y-%m-%d %H:%M"),
+                        "Date": s_["at"].date(),
+                        "Lines": s_["totals"].get("lines"),
+                        "Value": s_["totals"].get("value"),
+                        "Units": s_["totals"].get("units"),
+                        "Categories": s_["totals"].get("categories"),
+                        "Dead codes": s_["totals"].get("not_in_master"),
+                        "_id": str(s_["_id"]),
+                    } for s_ in snaps]).sort_values("When")
+
+                    m1, m2, m3 = st.columns(3)
+                    first, last = hist.iloc[0], hist.iloc[-1]
+                    m1.markdown(stat_card("First snapshot",
+                                          money_html(first["Value"], 0),
+                                          str(first["When"])),
+                                unsafe_allow_html=True)
+                    m2.markdown(stat_card("Latest",
+                                          money_html(last["Value"], 0),
+                                          str(last["When"])),
+                                unsafe_allow_html=True)
+                    delta = last["Value"] - first["Value"]
+                    m3.markdown(stat_card(
+                        "Change", money_html(delta, 0),
+                        "lower is better" if delta > 0 else "gone the wrong way"),
+                        unsafe_allow_html=True)
+                    st.write("")
+
+                    plot = hist.assign(Negative=hist["Value"].abs())
+                    st.altair_chart(
+                        alt.Chart(plot).mark_line(
+                            color="#ff6b6b", strokeWidth=2,
+                            point=alt.OverlayMarkDef(color="#ff6b6b"))
+                        .encode(
+                            x=alt.X("When:T", title=None),
+                            y=alt.Y("Negative:Q", title="Negative value (AED)",
+                                    axis=alt.Axis(format=",.0f", grid=True,
+                                                  gridColor="#ffffff12")),
+                            tooltip=[alt.Tooltip("When:T"),
+                                     alt.Tooltip("Negative:Q", format=",.2f"),
+                                     alt.Tooltip("Lines:Q", format=",.0f"),
+                                     alt.Tooltip("Dead codes:Q")])
+                        .properties(height=280).configure_view(strokeWidth=0),
+                        use_container_width=True)
+
+                    st.dataframe(hist.drop(columns=["_id", "Date"])
+                                 .sort_values("When", ascending=False),
+                                 use_container_width=True, hide_index=True,
+                                 column_config={
+                                     "Value": st.column_config.NumberColumn(
+                                         format="AED %.2f"),
+                                     "Units": st.column_config.NumberColumn(
+                                         format="%.2f")})
+
+                    pickd = st.selectbox("Open a snapshot",
+                                         hist["When"].tolist()[::-1])
+                    row = hist[hist["When"] == pickd].iloc[0]
+                    full = store.get_snapshot(row["_id"])
+                    if full and full.get("by_category"):
+                        bysnap = pd.DataFrame(full["by_category"])
+                        bysnap = bysnap.sort_values("value")
+                        st.caption(
+                            f"{full.get('source', {}).get('negative_file', '')}")
+                        st.dataframe(bysnap, use_container_width=True,
+                                     hide_index=True,
+                                     column_config={
+                                         "value": st.column_config.NumberColumn(
+                                             "Value", format="AED %.2f"),
+                                         "qty": st.column_config.NumberColumn(
+                                             "Units", format="%.2f")})
 
             with sub1:
                 batches = store.list_batches()
