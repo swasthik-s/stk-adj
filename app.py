@@ -732,13 +732,18 @@ with tab1:
 @st.fragment
 def candidates_tab(neg, master, master_idx, neg_map,
                    br_thresh, sw_lo, sw_hi, price_tol, drift_tol):
+    counts = (neg.groupby("category")
+              .agg(lines=("val", "size"), val=("val", "sum")))
     cats = sorted(neg["category"].dropna().unique())
-    default = [c for c in cats
-               if c in ("GROCERY FOOD", "GROCERY NON FOOD",
-                        "HEALTH AND BEAUTY", "GARMENTS")]
+    label = {c: f"{c}  ({int(counts.loc[c, 'lines'])} lines, "
+                f"{counts.loc[c, 'val']:,.0f} AED)" for c in cats}
 
     c1, c2 = st.columns([3, 2])
-    pick_cats = c1.multiselect("Categories", cats, default=default or cats)
+    picked = c1.multiselect(
+        "Categories — pick one at a time", [label[c] for c in cats], default=[],
+        help="Nothing runs until you choose. One section at a time keeps the "
+             "list short and the matches easier to check.")
+    pick_cats = [c for c in cats if label[c] in picked]
     mode = c2.selectbox("What to look for",
                         ["Bundle breaks only", "Wrong sales only", "Both"],
                         index=0)
@@ -748,9 +753,12 @@ def candidates_tab(neg, master, master_idx, neg_map,
         default=[c for c in cats if c == "GARMENTS"],
         help="Garments are wrong-sale only")
     c4.write("")
-    run = c4.button("Run matching", type="primary", use_container_width=True)
+    run = c4.button("Run matching", type="primary", use_container_width=True,
+                    disabled=not pick_cats)
+    if not pick_cats:
+        st.info("Choose a category above to start.")
 
-    if run:
+    if run and pick_cats:
         d = neg[neg["category"].isin(pick_cats)]
         parts, combos = [], pd.DataFrame()
         with st.status("Matching…", expanded=False) as status:
@@ -769,9 +777,21 @@ def candidates_tab(neg, master, master_idx, neg_map,
         if parts:
             cand = pd.concat(parts, ignore_index=True)
             cand = cand.drop_duplicates("neg_bc", keep="first")
-            cand["problems"] = ["; ".join(validate(r, master_idx, neg_map, drift_tol))
-                                for r in cand.to_dict("records")]
-            cand["use"] = cand["problems"].eq("")
+            cand["abs_val"] = cand["neg_val"].abs()
+            cand = (cand.sort_values("abs_val", ascending=False)
+                    .drop(columns="abs_val").reset_index(drop=True))
+            probs = [validate(r, master_idx, neg_map, drift_tol)
+                     for r in cand.to_dict("records")]
+            cand["problems"] = ["; ".join(p) for p in probs]
+            # over/under-clear is normal odd-quantity overshoot, not a fault
+            cand["blocked"] = [
+                any(not (x.startswith("over-clears") or x.startswith("under-clears"))
+                    for x in p) for p in probs]
+            clean = ~cand["blocked"]
+            # rank within the unblocked rows, so you always get a full sheet
+            rank = cand["neg_val"].abs().where(clean).rank(ascending=False,
+                                                           method="first")
+            cand["use"] = clean & (rank <= PAIRS_PER_FILE)
             st.session_state["cand"] = cand
             st.session_state["combos"] = combos
             st.session_state["batch"] = 0
@@ -796,34 +816,70 @@ def candidates_tab(neg, master, master_idx, neg_map,
         m1, m2, m3, m4 = st.columns(4)
         m1.metric("Candidates", len(cand))
         m2.metric("Value covered", f"{cand['neg_val'].sum():,.0f} AED")
-        m3.metric("Clean", int(cand["problems"].eq("").sum()))
+        m3.metric("No blockers", int(clean_mask.sum()))
         m4.metric("Ticked", int(cand["use"].sum()))
 
-        BASIC = ["use", "neg_desc", "neg_qty", "par_desc", "conv",
+        clean_mask = ~cand["blocked"] if "blocked" in cand.columns \
+            else cand["problems"].eq("")
+        q1, q2, q3, q4 = st.columns([1.2, 1.2, 1.2, 1.4])
+        topn = q1.number_input("Top N by value", min_value=1,
+                               max_value=len(cand), value=min(11, len(cand)),
+                               step=1, label_visibility="visible")
+        q2.write(""); q3.write(""); q4.write("")
+        if q2.button(f"Select top {int(topn)}", use_container_width=True):
+            order = (cand["neg_val"].abs().where(clean_mask)
+                     .rank(ascending=False, method="first"))
+            cand["use"] = clean_mask & (order <= int(topn))
+            st.session_state["cand"] = cand
+        if q3.button("Select all clean", use_container_width=True):
+            cand["use"] = clean_mask
+            st.session_state["cand"] = cand
+        if q4.button("Clear all", use_container_width=True):
+            cand["use"] = False
+            st.session_state["cand"] = cand
+
+        st.caption(
+            f"Sorted highest negative value first. "
+            f"Top {int(topn)} unblocked pairs are worth "
+            f"{cand.loc[clean_mask, 'neg_val'].abs().nlargest(int(topn)).sum():,.0f} AED "
+            f"of {cand.loc[clean_mask, 'neg_val'].abs().sum():,.0f} unblocked total. "
+            f"Over-clear notes are normal odd-quantity overshoot, not blockers."
+        )
+
+        BASIC = ["use", "neg_desc", "neg_qty", "neg_val", "par_desc", "conv",
                  "outers_needed", "cost_drift_pct", "problems"]
         extra_opts = [c for c in cand.columns if c not in BASIC]
         show_extra = st.multiselect("Add columns", extra_opts, default=[],
                                     help="The preview stays compact by default")
         cols = [c for c in BASIC if c in cand.columns] + show_extra
 
-        st.caption("Untick anything you do not want. Check the physical shelf first.")
-        edited = st.data_editor(
-            cand[cols], use_container_width=True, hide_index=True, height=380,
-            column_config={
-                "use": st.column_config.CheckboxColumn("✓", width="small"),
-                "neg_desc": st.column_config.TextColumn("Negative item", width="large"),
-                "par_desc": st.column_config.TextColumn("Outer / source", width="large"),
-                "neg_qty": st.column_config.NumberColumn("Neg qty", width="small"),
-                "conv": st.column_config.NumberColumn("Conv", width="small"),
-                "outers_needed": st.column_config.NumberColumn("Outers", width="small"),
-                "cost_drift_pct": st.column_config.NumberColumn(
-                    "Drift %", format="%.0f%%", width="small"),
-                "problems": st.column_config.TextColumn("Problems", width="medium"),
-            },
-            disabled=[c for c in cols if c != "use"],
-        )
-        cand["use"] = edited["use"].values
-        st.session_state["cand"] = cand
+        with st.form("tick_form", border=False):
+            st.caption("Tick freely — nothing reloads until you press Apply. "
+                       "Check the physical shelf first.")
+            edited = st.data_editor(
+                cand[cols], use_container_width=True, hide_index=True, height=380,
+                column_config={
+                    "use": st.column_config.CheckboxColumn("✓", width="small"),
+                    "neg_desc": st.column_config.TextColumn("Negative item", width="large"),
+                    "par_desc": st.column_config.TextColumn("Outer / source", width="large"),
+                    "neg_qty": st.column_config.NumberColumn("Neg qty", width="small"),
+                    "neg_val": st.column_config.NumberColumn("Neg value", format="%.2f",
+                                                             width="small"),
+                    "conv": st.column_config.NumberColumn("Conv", width="small"),
+                    "outers_needed": st.column_config.NumberColumn("Outers", width="small"),
+                    "cost_drift_pct": st.column_config.NumberColumn(
+                        "Drift %", format="%.0f%%", width="small"),
+                    "problems": st.column_config.TextColumn("Problems", width="medium"),
+                },
+                disabled=[c for c in cols if c != "use"],
+                key="cand_editor",
+            )
+            applied = st.form_submit_button("Apply ticks", type="primary")
+
+        if applied:
+            cand["use"] = edited["use"].values
+            st.session_state["cand"] = cand
+            st.session_state["batch"] = 0
     elif cand is not None:
         st.warning("No candidates. Loosen the sliders in the sidebar and run again.")
 
