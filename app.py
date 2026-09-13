@@ -22,7 +22,8 @@ st.set_page_config(page_title="Negative Stock Tool", page_icon="📦", layout="w
 COMPANY = "AL MADINA HYPERMARKET"
 BRANCH = "SHAMS AL MADINA HYPERMARKET LLC"
 COST_DP = 7
-PAIRS_PER_FILE = 5
+PAIRS_PER_FILE = 7
+BLANK_PAD = True          # pad each sheet out to PAIRS_PER_FILE ruled rows
 
 THIN = Side(style="thin")
 BOX = Border(left=THIN, right=THIN, top=THIN, bottom=THIN)
@@ -30,8 +31,12 @@ GREY = PatternFill("solid", fgColor="BFBFBF")
 DARK = PatternFill("solid", fgColor="808080")
 WHITE_BOLD = Font(bold=True, color="FFFFFF")
 CENTER = Alignment(horizontal="center", vertical="center")
-HEADERS = ["SL NO", "SINGLE BARCODE", "DESCRIPTION", "UNIT", "QTY", "COST", "VALUE"]
-WIDTHS = [8, 20, 52, 8, 11, 13, 13]
+HEADERS = ["SL NO", "OUTER BARCODE", "SINGLE BARCODE", "DESCRIPTION",
+           "UNIT", "QTY", "COST", "VALUE"]
+WIDTHS = [8, 20, 20, 52, 9, 11, 12, 13]
+RED = PatternFill("solid", fgColor="C00000")
+RED_FONT = Font(bold=True, color="C00000")
+TEXT_FMT = "@"
 
 NOISE = re.compile(r"[^A-Z0-9 ]+")
 MULT = re.compile(
@@ -307,68 +312,113 @@ class Line:
                 (self.sng_bc, self.sng_desc, self.sng_unit, sq, sc, sv)]
 
 
-def build_sheet(lines, remarks, date_str, prepared, verified, approved) -> bytes:
+def build_sheet(lines, remarks, date_str, prepared, checked, verified) -> bytes:
     wb = Workbook(); ws = wb.active; ws.title = "ADJUSTMENT"
     ncol = len(HEADERS); last = get_column_letter(ncol)
     for i, w in enumerate(WIDTHS, start=1):
         ws.column_dimensions[get_column_letter(i)].width = w
 
     ws.merge_cells(f"A1:{last}1"); ws["A1"] = COMPANY
-    ws["A1"].font = Font(size=18, bold=True); ws["A1"].alignment = CENTER
-    ws["A1"].fill = GREY; ws.row_dimensions[1].height = 26
+    ws["A1"].font = Font(size=14, bold=True, color="C00000")
+    ws["A1"].alignment = CENTER
     ws.merge_cells(f"A2:{last}2"); ws["A2"] = "ADJUSTMENT"
-    ws["A2"].font = Font(size=12, bold=True); ws["A2"].alignment = CENTER
-    ws["A3"] = "BRANCH"; ws["A3"].fill = DARK; ws["A3"].font = WHITE_BOLD
+    ws["A2"].font = Font(size=14, bold=True, color="C00000")
+    ws["A2"].alignment = CENTER
+
+    ws["A3"] = "BRANCH"; ws["A3"].fill = RED; ws["A3"].font = WHITE_BOLD
     ws["A3"].alignment = CENTER
-    ws.merge_cells(f"B3:{last}3"); ws["B3"] = BRANCH; ws["B3"].font = Font(bold=True)
-    ws["A4"] = "Remarks"; ws["A4"].fill = DARK; ws["A4"].font = WHITE_BOLD
+    ws.merge_cells(f"B3:{last}3"); ws["B3"] = BRANCH
+    ws["B3"].font = Font(size=12, bold=True)
+
+    ws["A4"] = "Remarks"; ws["A4"].fill = RED; ws["A4"].font = WHITE_BOLD
     ws["A4"].alignment = CENTER
-    ws.merge_cells("B4:E4"); ws["B4"] = remarks
-    ws.merge_cells("F4:G4"); ws["F4"] = f"Date : {date_str}"
-    ws["F4"].alignment = Alignment(horizontal="right")
+    ws.merge_cells("B4:F4"); ws["B4"] = remarks; ws["B4"].font = Font(bold=True)
+    ws.merge_cells(f"G4:{last}4"); ws["G4"] = f"Date : {date_str}"
+    ws["G4"].font = Font(bold=True)
+    ws["G4"].alignment = Alignment(horizontal="right")
     for c in range(1, ncol + 1):
         for r in (3, 4):
             ws.cell(row=r, column=c).border = BOX
+
     for c, h in enumerate(HEADERS, start=1):
-        cell = ws.cell(row=5, column=c, value=h)
-        cell.fill = DARK; cell.font = WHITE_BOLD
+        cell = ws.cell(row=6, column=c, value=h)
+        cell.fill = RED; cell.font = WHITE_BOLD
         cell.alignment = CENTER; cell.border = BOX
 
-    row = 6; first = row
-    for sl, ln in enumerate(lines, start=1):
+    row = 7; first = row
+
+    def rule(r):
+        for c in range(1, ncol + 1):
+            ws.cell(row=r, column=c).border = BOX
+        ws.cell(row=r, column=2).number_format = TEXT_FMT
+        ws.cell(row=r, column=3).number_format = TEXT_FMT
+        ws.cell(row=r, column=5).alignment = CENTER
+        ws.cell(row=r, column=6).number_format = "0.###"
+        ws.cell(row=r, column=7).number_format = "0.#######"
+        ws.cell(row=r, column=8).number_format = "0.00"
+
+    sl = 0
+    for ln in lines:
+        sl += 1
         start = row
-        for bc, desc, unit, qty, cost, val in ln.rows():
-            ws.cell(row=row, column=2, value=str(bc))
-            ws.cell(row=row, column=3, value=desc)
-            ws.cell(row=row, column=4, value=unit).alignment = CENTER
-            ws.cell(row=row, column=5, value=qty).number_format = "0.###"
-            ws.cell(row=row, column=6, value=cost).number_format = "0.#######"
-            ws.cell(row=row, column=7, value=val).number_format = "0.00"
-            for c in range(1, ncol + 1):
-                ws.cell(row=row, column=c).border = BOX
-            row += 1
+        (obc, odesc, ounit, oqty, ocost, oval), \
+            (sbc, sdesc, sunit, sqty, scost, sval) = ln.rows()
+        # outer row - barcode in the OUTER column only
+        ws.cell(row=row, column=2, value=str(obc))
+        ws.cell(row=row, column=4, value=odesc)
+        ws.cell(row=row, column=5, value="OFR" if ln.conv != 1 else ounit)
+        ws.cell(row=row, column=6, value=oqty)
+        ws.cell(row=row, column=7, value=ocost)
+        ws.cell(row=row, column=8, value=oval)
+        rule(row); row += 1
+        # single row - barcode in the SINGLE column only
+        ws.cell(row=row, column=3, value=str(sbc))
+        ws.cell(row=row, column=4, value=sdesc)
+        ws.cell(row=row, column=5, value=sunit)
+        ws.cell(row=row, column=6, value=sqty)
+        ws.cell(row=row, column=7, value=scost)
+        ws.cell(row=row, column=8, value=sval)
+        rule(row); row += 1
         ws.merge_cells(start_row=start, start_column=1, end_row=row - 1, end_column=1)
         c = ws.cell(row=start, column=1, value=sl)
         c.alignment = CENTER; c.border = BOX
 
-    ws.merge_cells(start_row=row, start_column=1, end_row=row, end_column=6)
+    # pad out with ruled empty pairs so the printed sheet always looks the same
+    if BLANK_PAD:
+        while sl < PAIRS_PER_FILE:
+            sl += 1
+            start = row
+            for _ in range(2):
+                ws.cell(row=row, column=8,
+                        value=f"=IF(F{row}=\"\",0,ROUND(F{row}*G{row},2))")
+                rule(row); row += 1
+            ws.merge_cells(start_row=start, start_column=1,
+                           end_row=row - 1, end_column=1)
+            c = ws.cell(row=start, column=1, value=sl)
+            c.alignment = CENTER; c.border = BOX
+
+    ws.merge_cells(start_row=row, start_column=1, end_row=row, end_column=7)
     t = ws.cell(row=row, column=1, value="TOTAL")
     t.font = Font(bold=True); t.alignment = Alignment(horizontal="right")
-    tv = ws.cell(row=row, column=7, value=f"=ROUND(SUM(G{first}:G{row-1}),2)")
+    tv = ws.cell(row=row, column=8, value=f"=ROUND(SUM(H{first}:H{row-1}),2)")
     tv.font = Font(bold=True); tv.number_format = "0.00"; tv.border = BOX
+    for c in range(1, ncol + 1):
+        ws.cell(row=row, column=c).border = BOX
 
-    row += 2
+    row += 1
     ws.cell(row=row, column=1, value="Prepared By").font = Font(bold=True)
-    ws.cell(row=row, column=3, value="Verified By").font = Font(bold=True)
-    ws.cell(row=row, column=6, value="Approved By").font = Font(bold=True)
-    ws.cell(row=row + 1, column=1, value=prepared)
-    ws.cell(row=row + 1, column=3, value=verified)
-    ws.cell(row=row + 1, column=6, value=approved)
-    ws.row_dimensions[row + 2].height = 45
+    ws.cell(row=row, column=4, value="Checked By").font = Font(bold=True)
+    ws.cell(row=row, column=7, value="Verified By").font = Font(bold=True)
+    ws.cell(row=row + 1, column=1, value=prepared).font = Font(bold=True)
+    ws.cell(row=row + 1, column=4, value=checked).font = Font(bold=True)
+    ws.cell(row=row + 1, column=7, value=verified).font = Font(bold=True)
+    ws.row_dimensions[row + 2].height = 50
+
     ws.print_area = f"A1:{last}{row+2}"
     ws.page_setup.orientation = "landscape"
     ws.page_setup.fitToWidth = 1
     ws.sheet_properties.pageSetUpPr.fitToPage = True
+    ws.freeze_panes = "A7"
 
     buf = io.BytesIO(); wb.save(buf); return buf.getvalue()
 
@@ -405,8 +455,8 @@ with st.sidebar:
     st.header("2. Sheet details")
     adj_date = st.text_input("Date", "11-09-26")
     prepared = st.text_input("Prepared by", "SWASTHIK")
-    verified = st.text_input("Verified by", "IRSHAD")
-    approved = st.text_input("Approved by", "THALLATH")
+    checked = st.text_input("Checked by", "IRSHAD")
+    verified = st.text_input("Verified by", "THALLATH")
     st.header("3. Matching")
     br_thresh = st.slider("Bundle break strictness", 0.70, 1.00, 0.80, 0.01,
                           help="Higher = fewer but safer matches")
@@ -592,7 +642,7 @@ with tab3:
                  f"{math.ceil(len(sel)/PAIRS_PER_FILE)} files")
         remarks = st.text_input(
             "Remarks",
-            "Stock transfer and wrong sale AND BARCODE CHANGE for negative stock clearance",
+            "OUTER BREAK FOR NEGATIVE STOCK",
         )
         if st.button("Generate adjustment sheets", type="primary") and sel:
             lines = [
@@ -609,7 +659,7 @@ with tab3:
                     chunk = lines[i:i + PAIRS_PER_FILE]
                     name = f"ADJ_{i//PAIRS_PER_FILE + 1:03d}.xlsx"
                     z.writestr(name, build_sheet(chunk, remarks, adj_date,
-                                                 prepared, verified, approved))
+                                                 prepared, checked, verified))
                     for ln, r in zip(chunk, sel[i:i + PAIRS_PER_FILE]):
                         a, b = ln.rows()
                         work.append({
@@ -624,9 +674,17 @@ with tab3:
                             "REASON": r.get("kind", ""),
                         })
                 wdf = pd.DataFrame(work)
+                for c in ("OUTER BARCODE", "SINGLE BARCODE"):
+                    wdf[c] = wdf[c].astype(str)
                 wb = io.BytesIO()
                 with pd.ExcelWriter(wb, engine="openpyxl") as xw:
                     wdf.to_excel(xw, sheet_name="WORKING", index=False)
+                    sh = xw.sheets["WORKING"]
+                    for col in ("C", "D"):
+                        for cell in sh[col]:
+                            cell.number_format = "@"
+                    sh.column_dimensions["C"].width = 20
+                    sh.column_dimensions["D"].width = 20
                 z.writestr("WORKING_ALL.xlsx", wb.getvalue())
 
             bad = int((wdf["DIFFERENCE"].abs() > 0.01).sum())
