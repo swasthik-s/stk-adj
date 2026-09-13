@@ -729,7 +729,9 @@ with tab1:
                      use_container_width=True, hide_index=True)
 
 # ---------- Candidates ----------
-with tab2:
+@st.fragment
+def candidates_tab(neg, master, master_idx, neg_map,
+                   br_thresh, sw_lo, sw_hi, price_tol, drift_tol):
     cats = sorted(neg["category"].dropna().unique())
     default = [c for c in cats
                if c in ("GROCERY FOOD", "GROCERY NON FOOD",
@@ -751,16 +753,19 @@ with tab2:
     if run:
         d = neg[neg["category"].isin(pick_cats)]
         parts, combos = [], pd.DataFrame()
-        with st.spinner("Matching…"):
+        with st.status("Matching…", expanded=False) as status:
             if mode in ("Bundle breaks only", "Both"):
+                status.update(label="Looking for bundle breaks…")
                 b, combos = find_breaks(
                     master, d[~d["category"].isin(no_break_cats)], br_thresh)
                 if len(b):
                     parts.append(b[b["covered"]])
             if mode in ("Wrong sales only", "Both"):
+                status.update(label="Looking for wrong sales…")
                 sw = find_swaps(master, d, sw_lo, sw_hi, price_tol)
                 if len(sw):
                     parts.append(sw)
+            status.update(label="Checking costs and stock…")
         if parts:
             cand = pd.concat(parts, ignore_index=True)
             cand = cand.drop_duplicates("neg_bc", keep="first")
@@ -770,7 +775,9 @@ with tab2:
             st.session_state["cand"] = cand
             st.session_state["combos"] = combos
             st.session_state["batch"] = 0
+            status.update(label=f"{len(cand)} candidates", state="complete")
         else:
+            status.update(label="No candidates", state="complete")
             st.session_state["cand"] = pd.DataFrame()
             st.session_state["combos"] = combos
 
@@ -890,7 +897,8 @@ with tabV:
     )
 
 # ---------- Build ----------
-with tab3:
+@st.fragment
+def build_tab(adj_date, prepared, checked, verified):
     cand = st.session_state.get("cand")
     manual = st.session_state.get("manual", [])
     pool = []
@@ -942,7 +950,7 @@ with tab3:
         if st.button("Reset counter"):
             st.session_state["batch"] = 0
             st.session_state.pop("last_sheet", None)
-            st.rerun()
+            st.rerun(scope="fragment")
 
         if gen:
             s0 = int(start_at) - 1
@@ -968,7 +976,6 @@ with tab3:
             st.session_state["last_sheet"] = (n, data, pdf,
                                               round(pdf["VALUE"].sum(), 2))
             st.session_state["batch"] = max(done, s0 + len(lines))
-            st.rerun()
 
         if st.session_state.get("last_sheet"):
             n, data, pdf, tot = st.session_state["last_sheet"]
@@ -990,6 +997,14 @@ with tab3:
                                "application/vnd.openxmlformats-officedocument."
                                "spreadsheetml.sheet",
                                use_container_width=True)
+
+with tab2:
+    candidates_tab(neg, master, master_idx, neg_map,
+                   br_thresh, sw_lo, sw_hi, price_tol, drift_tol)
+
+with tab3:
+    build_tab(adj_date, prepared, checked, verified)
+
 
 # ---------- Manual ----------
 with tab4:
