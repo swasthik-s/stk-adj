@@ -171,7 +171,8 @@ def load_negatives(raw: bytes, sheet=0, header_row=None, mapping=None) -> pd.Dat
             elif code not in ("", "nan", "None"):
                 cat = code
             continue
-        r["group"], r["category"] = grp, (cat or "UNCATEGORISED")
+        r["group"] = grp or "STOCK"
+        r["category"] = cat or "UNCATEGORISED"
         r["Item Name"] = name
         r["bc"] = code
         rows.append(r)
@@ -782,31 +783,143 @@ tab1, tab2, tabV, tab3, tab4, tabA = st.tabs(
 
 # ---------- Overview ----------
 with tab1:
-    c1, c2, c3 = st.columns(3)
+    total = float(neg["val"].sum())
+    units = float(neg["qty"].sum())
+    in_master = neg["bc"].isin(set(master["Item Barcode"]))
+
+    c1, c2, c3, c4 = st.columns(4)
     c1.metric("Negative lines", f"{len(neg):,}")
-    c2.metric("Negative value", f"{neg['val'].sum():,.0f} AED")
-    c3.metric("Master items", f"{len(master):,}")
+    c2.metric("Negative value", f"{total:,.0f} AED")
+    c3.metric("Units short", f"{units:,.0f}")
+    c4.metric("Avg per line", f"{total/max(len(neg),1):,.1f} AED")
 
-    by_cat = (neg.groupby(["group", "category"])
-              .agg(Lines=("val", "size"), Qty=("qty", "sum"), Value=("val", "sum"))
-              .round(2).sort_values("Value").reset_index())
+    # ---------- by group ----------
+    if neg["group"].nunique() > 1:
+        g = (neg.groupby("group", dropna=False)
+             .agg(Lines=("val", "size"), Value=("val", "sum"))
+             .reset_index().sort_values("Value"))
+        cols = st.columns(len(g))
+        for col, r in zip(cols, g.to_dict("records")):
+            col.metric(r["group"], f"{r['Value']:,.0f} AED",
+                       f"{int(r['Lines'])} lines", delta_color="off")
+
+    # ---------- by category ----------
     st.subheader("By category")
-    st.dataframe(by_cat, use_container_width=True, hide_index=True)
+    by_cat = (neg.groupby("category", dropna=False)
+              .agg(Lines=("val", "size"), Units=("qty", "sum"),
+                   Value=("val", "sum"))
+              .reset_index().sort_values("Value"))
+    by_cat["Share %"] = (by_cat["Value"] / total * 100).round(1)
+    by_cat["Avg/line"] = (by_cat["Value"] / by_cat["Lines"]).round(1)
+    by_cat["Worst line"] = [
+        neg.loc[neg["category"] == c, "val"].min() for c in by_cat["category"]]
 
-    st.subheader("Concentration")
-    s = neg.sort_values("val")
-    for n in (20, 50, 100, 200):
-        if n <= len(s):
-            v = s["val"].head(n).sum()
-            st.write(f"Top {n} lines carry **{v:,.0f} AED** "
-                     f"({v/neg['val'].sum()*100:.0f}% of the total)")
+    st.bar_chart(by_cat.assign(v=by_cat["Value"].abs())
+                 .set_index("category")["v"].rename("Negative value (AED)"),
+                 horizontal=True, height=max(260, 24 * len(by_cat)))
 
-    st.subheader("Not in masterlist")
-    miss = neg[~neg["bc"].isin(master["Item Barcode"])]
-    st.write(f"{len(miss)} lines worth {miss['val'].sum():,.0f} AED — dead codes")
+    st.dataframe(
+        by_cat.rename(columns={"category": "Category"}),
+        use_container_width=True, hide_index=True,
+        column_config={
+            "Value": st.column_config.NumberColumn("Value (AED)", format="%.0f"),
+            "Units": st.column_config.NumberColumn(format="%.0f"),
+            "Share %": st.column_config.ProgressColumn(
+                "Share", format="%.1f%%", min_value=0.0,
+                max_value=float(max(by_cat["Share %"].max(), 1))),
+            "Avg/line": st.column_config.NumberColumn(format="%.1f"),
+            "Worst line": st.column_config.NumberColumn(format="%.0f"),
+        })
+
+    # ---------- shape of the problem ----------
+    st.subheader("Shape of the problem")
+    bands = [(0, 10, "under 10"), (10, 50, "10 to 50"), (50, 200, "50 to 200"),
+             (200, 1000, "200 to 1,000"), (1000, 1e12, "over 1,000")]
+    rows = []
+    av = neg["val"].abs()
+    for lo, hi, name in bands:
+        m = (av >= lo) & (av < hi)
+        rows.append({"Value band (AED)": name, "Lines": int(m.sum()),
+                     "Value": round(float(neg.loc[m, "val"].sum()), 2),
+                     "% of value": round(
+                         float(neg.loc[m, "val"].sum()) / total * 100, 1)})
+    st.dataframe(pd.DataFrame(rows), use_container_width=True, hide_index=True,
+                 column_config={
+                     "Value": st.column_config.NumberColumn(format="%.0f"),
+                     "% of value": st.column_config.ProgressColumn(
+                         format="%.1f%%", min_value=0.0, max_value=100.0)})
+
+    # ---------- data quality ----------
+    st.subheader("Data quality")
+    q1, q2, q3 = st.columns(3)
+    miss = neg[~in_master]
+    q1.metric("Not in masterlist", f"{len(miss):,}",
+              f"{miss['val'].sum():,.0f} AED", delta_color="off")
+    frac = neg[(neg["qty"] % 1 != 0)]
+    q2.metric("Fractional quantities", f"{len(frac):,}",
+              f"{frac['val'].sum():,.0f} AED", delta_color="off")
+    nocost = neg[neg["cost"].isna() | (neg["cost"] == 0)] \
+        if "cost" in neg.columns else neg.iloc[0:0]
+    q3.metric("No cost on file", f"{len(nocost):,}",
+              f"{nocost['val'].sum():,.0f} AED", delta_color="off")
+
+    # ---------- category drill-down ----------
+    st.subheader("Categories")
+    st.caption("Click a category to open its items.")
+
+    f1, f2 = st.columns([2, 3])
+    order = f1.selectbox("Order by", ["Value", "Name", "Lines"], index=0)
+    find = f2.text_input("Search item or barcode (searches every category)", "")
+
+    itemno_col = "Item No" if "Item No" in neg.columns else None
+    hit = None
+    if find.strip():
+        t = find.strip().upper()
+        hit = neg[neg["Item Name"].str.upper().str.contains(t, na=False)
+                  | neg["bc"].str.upper().str.contains(t, na=False)]
+        st.info(f"{len(hit)} matching lines · {hit['val'].sum():,.0f} AED")
+
+    def item_table(df):
+        cols = ["bc", "Item Name"] + ([itemno_col] if itemno_col else []) + \
+               ["qty", "val"]
+        names = {"bc": "ItemCode", "Item Name": "Item Name",
+                 "qty": "Quantity", "val": "Stock Value"}
+        st.dataframe(
+            df.sort_values("val")[cols].rename(columns=names),
+            use_container_width=True, hide_index=True,
+            column_config={
+                "ItemCode": st.column_config.TextColumn(width="medium"),
+                "Item Name": st.column_config.TextColumn(width="large"),
+                "Quantity": st.column_config.NumberColumn(format="%.2f"),
+                "Stock Value": st.column_config.NumberColumn(format="%.2f")})
+
+    if hit is not None and len(hit):
+        item_table(hit)
+        st.divider()
+
+    if order == "Value":
+        cat_order = by_cat.sort_values("Value")["category"].tolist()
+    elif order == "Lines":
+        cat_order = by_cat.sort_values("Lines", ascending=False)["category"].tolist()
+    else:
+        cat_order = sorted(by_cat["category"])
+
+    for c in cat_order:
+        row = by_cat[by_cat["category"] == c].iloc[0]
+        sub = neg[neg["category"] == c]
+        with st.expander(
+                f"{c}  ·  {int(row['Lines'])} lines  ·  "
+                f"{row['Units']:,.2f} qty  ·  {row['Value']:,.2f} AED"):
+            item_table(sub)
+            st.caption(f"Worst line {sub['val'].min():,.2f} AED  ·  "
+                       f"average {row['Avg/line']:,.1f} AED per line  ·  "
+                       f"{row['Share %']:.1f}% of the store total")
+
     if len(miss):
-        st.dataframe(miss[["bc", "Item Name", "qty", "val"]],
-                     use_container_width=True, hide_index=True)
+        with st.expander(f"Not in the masterlist — {len(miss)} dead codes  ·  "
+                         f"{miss['val'].sum():,.2f} AED"):
+            item_table(miss)
+
 
 # ---------- Candidates ----------
 @st.fragment
