@@ -1092,31 +1092,46 @@ with tab1:
 
     with st.expander("Lines against value — where effort pays off"):
         sc = by_cat.assign(Negative=by_cat["Value"].abs(),
-                           AvgLine=by_cat["Avg/line"].abs())
-        pts = (alt.Chart(sc).mark_circle(opacity=.8)
-               .encode(
-                   x=alt.X("Lines:Q", title="Number of lines",
-                           scale=alt.Scale(type="symlog")),
-                   y=alt.Y("Negative:Q", title="Negative value (AED)",
-                           scale=alt.Scale(type="symlog")),
-                   size=alt.Size("AvgLine:Q", title="Avg per line",
-                                 scale=alt.Scale(range=[60, 900])),
-                   color=alt.Color("Negative:Q", legend=None,
-                                   scale=alt.Scale(scheme="reds")),
-                   tooltip=[alt.Tooltip("category:N", title="Category"),
-                            alt.Tooltip("Lines:Q", format=",.0f"),
-                            alt.Tooltip("Negative:Q", title="Value (AED)",
-                                        format=",.2f"),
-                            alt.Tooltip("AvgLine:Q", title="Avg per line",
-                                        format=",.1f")])
-               .interactive())
-        txt = pts.mark_text(align="left", dx=9, fontSize=10,
-                            color="#c9cdd4").encode(text="category:N")
-        st.altair_chart((pts + txt).properties(height=420)
-                        .configure_view(strokeWidth=0), use_container_width=True)
-        st.caption("Top left is a few lines holding a lot of money — worth doing "
-                   "by hand. Bottom right is many small lines — bulk adjust. "
-                   "Scroll to zoom, drag to pan.")
+                           AvgLine=by_cat["Avg/line"].abs()).copy()
+        sc["Label"] = sc["category"].str.slice(0, 18)
+        xmax = float(sc["Lines"].max()) * 1.6
+        ymax = float(sc["Negative"].max()) * 1.6
+
+        base = alt.Chart(sc).encode(
+            x=alt.X("Lines:Q", title="Number of lines",
+                    scale=alt.Scale(type="symlog", domain=[0, xmax],
+                                    clamp=True),
+                    axis=alt.Axis(grid=True, gridColor="#ffffff12")),
+            y=alt.Y("Negative:Q", title="Negative value (AED)",
+                    scale=alt.Scale(type="symlog", domain=[0, ymax],
+                                    clamp=True),
+                    axis=alt.Axis(format=",.0f", grid=True,
+                                  gridColor="#ffffff12")),
+            tooltip=[alt.Tooltip("category:N", title="Category"),
+                     alt.Tooltip("Lines:Q", title="Lines", format=",.0f"),
+                     alt.Tooltip("Negative:Q", title="Value (AED)",
+                                 format=",.2f"),
+                     alt.Tooltip("AvgLine:Q", title="Avg per line",
+                                 format=",.1f")])
+
+        pts = base.mark_circle(opacity=.85).encode(
+            size=alt.Size("AvgLine:Q", title="Avg per line",
+                          scale=alt.Scale(range=[70, 700])),
+            color=alt.Color("Negative:Q", legend=None,
+                            scale=alt.Scale(scheme="reds")))
+
+        # size is FONT SIZE on a text mark — pin it, never inherit it
+        txt = base.mark_text(align="left", dx=11, dy=-1, fontSize=10,
+                             color="#c9cdd4").encode(
+            text=alt.Text("Label:N"), size=alt.value(10),
+            color=alt.value("#c9cdd4"))
+
+        st.altair_chart((pts + txt).properties(height=430)
+                        .configure_view(strokeWidth=0),
+                        use_container_width=True)
+        st.caption("Bubble size is the average per line. Top left is a few "
+                   "lines holding a lot of money — worth doing by hand. "
+                   "Bottom right is many small lines — bulk adjust.")
 
     # ---------- shape of the problem ----------
     st.subheader("Shape of the problem")
@@ -1188,7 +1203,20 @@ with tab1:
                   | neg["bc"].str.upper().str.contains(t, na=False)]
         st.info(f"{len(hit)} matching lines · {money(hit['val'].sum(), 0)}")
 
-    def item_table(df):
+    def copy_block(codes, key):
+        """st.code carries a native copy icon, and copies the text verbatim —
+        no thousands separators, no currency, no scientific notation."""
+        codes = [str(c).strip() for c in codes if str(c).strip()]
+        if not codes:
+            return
+        with st.expander(f"Copy barcodes ({len(codes)})"):
+            sep = st.radio("Separator", ["One per line", "Comma", "Space"],
+                           horizontal=True, key=f"sep_{key}",
+                           label_visibility="collapsed") or "One per line"
+            joiner = {"One per line": "\n", "Comma": ",", "Space": " "}[sep]
+            st.code(joiner.join(codes), language=None)
+
+    def item_table(df, key="x"):
         cols = ["bc", "Item Name"] + ([itemno_col] if itemno_col else []) + \
                ["qty", "val"]
         names = {"bc": "ItemCode", "Item Name": "Item Name",
@@ -1202,9 +1230,10 @@ with tab1:
                 "Item Name": st.column_config.TextColumn(width="large"),
                 "Quantity": st.column_config.NumberColumn(format="%.2f"),
                 "Stock Value": st.column_config.NumberColumn(format="AED %.2f")})
+        copy_block(out["ItemCode"].tolist(), key)
 
     if hit is not None and len(hit):
-        item_table(hit)
+        item_table(hit, key="search")
         st.divider()
 
     if order == "Value":
@@ -1220,7 +1249,7 @@ with tab1:
         with st.expander(
                 f"{c}  ·  {int(row['Lines'])} lines  ·  "
                 f"{row['Units']:,.2f} qty  ·  {money(row['Value'])}"):
-            item_table(sub)
+            item_table(sub, key=f"cat_{c}")
             st.caption(f"Worst line {money(sub['val'].min())}  ·  "
                        f"average {money(row['Avg/line'], 1)} per line  ·  "
                        f"{row['Share %']:.1f}% of the store total")
@@ -1228,7 +1257,7 @@ with tab1:
     if len(miss):
         with st.expander(f"Not in the masterlist — {len(miss)} dead codes  ·  "
                          f"{money(miss['val'].sum())}"):
-            item_table(miss)
+            item_table(miss, key="dead")
 
 
 # ---------- Candidates ----------
@@ -1371,6 +1400,24 @@ def candidates_tab(neg, master, master_idx, neg_map,
                                     key="extra_cols")
         cols = [c for c in BASIC if c in cand.columns] + show_extra
 
+        def cand_copy(df, key):
+            codes = [str(c).strip() for c in df.get("neg_bc", []) if str(c).strip()]
+            if not codes:
+                return
+            with st.expander(f"Copy barcodes ({len(codes)})"):
+                which = st.radio("Which", ["Negative item", "Outer / source",
+                                           "Both, one pair per line"],
+                                 horizontal=True, key=f"cw_{key}",
+                                 label_visibility="collapsed") or "Negative item"
+                if which == "Negative item":
+                    txt = "\n".join(str(x).strip() for x in df["neg_bc"])
+                elif which == "Outer / source":
+                    txt = "\n".join(str(x).strip() for x in df["par_bc"])
+                else:
+                    txt = "\n".join(f"{str(a).strip()},{str(b).strip()}"
+                                     for a, b in zip(df["par_bc"], df["neg_bc"]))
+                st.code(txt, language=None)
+
         view = st.radio("Show", ["Taken", "Left out", "Everything"],
                         horizontal=True, key="view_mode")
         shown = (cand[cand["use"]] if view == "Taken"
@@ -1392,6 +1439,7 @@ def candidates_tab(neg, master, master_idx, neg_map,
                     "Drift %", format="%.0f%%", width="small"),
                 "problems": st.column_config.TextColumn("Notes", width="medium"),
             })
+        cand_copy(shown, "cand")
 
     elif cand is not None:
         st.warning("No candidates. Loosen the sliders in the sidebar and run again.")
@@ -1646,6 +1694,11 @@ def build_tab(adj_date, prepared, checked, verified, txt_prefix, store):
                     "DESCRIPTION": st.column_config.TextColumn(width="large"),
                     "VALUE": st.column_config.NumberColumn(format="AED %.2f"),
                 })
+            with st.expander("Copy barcodes from this sheet"):
+                st.code("\n".join(
+                    [str(x).strip() for x in pdf["OUTER BARCODE"] if str(x).strip()]
+                    + [str(x).strip() for x in pdf["SINGLE BARCODE"]
+                       if str(x).strip()]), language=None)
             d1, d2 = st.columns(2)
             d1.download_button(f"⬇ ADJ_{n:03d}.xlsx", data, f"ADJ_{n:03d}.xlsx",
                                "application/vnd.openxmlformats-officedocument."
