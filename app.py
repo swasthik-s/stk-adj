@@ -813,14 +813,14 @@ def candidates_tab(neg, master, master_idx, neg_map,
             st.dataframe(combos, use_container_width=True, hide_index=True)
 
     if cand is not None and len(cand):
+        clean_mask = (~cand["blocked"] if "blocked" in cand.columns
+                      else cand["problems"].eq(""))
         m1, m2, m3, m4 = st.columns(4)
         m1.metric("Candidates", len(cand))
         m2.metric("Value covered", f"{cand['neg_val'].sum():,.0f} AED")
         m3.metric("No blockers", int(clean_mask.sum()))
         m4.metric("Ticked", int(cand["use"].sum()))
 
-        clean_mask = ~cand["blocked"] if "blocked" in cand.columns \
-            else cand["problems"].eq("")
         q1, q2, q3, q4 = st.columns([1.2, 1.2, 1.2, 1.4])
         topn = q1.number_input("Top N by value", min_value=1,
                                max_value=len(cand), value=min(11, len(cand)),
