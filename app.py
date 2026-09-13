@@ -23,7 +23,42 @@ from openpyxl import Workbook
 from openpyxl.styles import Alignment, Border, Font, PatternFill, Side
 from openpyxl.utils import get_column_letter
 
+# ---- currency symbol -------------------------------------------------
+# The Emirati dirham sign is U+20C3, accepted for Unicode 18.0 (Sept 2026).
+# Most systems do not carry the glyph yet, so it renders as an empty box
+# unless a font supplying it is loaded. Options:
+#   "AED"      always safe, works everywhere including Excel
+#   "\u20C3"   the new sign — needs DIRHAM_FONT_CSS below, and even then
+#              Streamlit's data grid may not pick the font up
+#   "\u062F.\u0625"  the Arabic د.إ, renders on any Arabic-capable font
+AED = "AED"
+
+# Paste a font URL here to load the glyph (e.g. the `dirham` npm package on a
+# CDN). Leave empty to skip. Check it renders before switching AED above —
+# a missing font shows a box, which is worse than the letters.
+DIRHAM_FONT_URL = ""
+
+# Official Emirati dirham sign, from the UAE design system. Inline SVG, so it
+# inherits the surrounding text colour and needs no font or image file.
+DIRHAM_SVG_PATH = (
+    "M 7.0625 0.0820312 C 7.097656 0.128906 7.273438 0.347656 7.441406 0.554688 C 8.664062 2.019531 9.585938 4.402344 10.078125 7.402344 C 10.40625 9.375 10.425781 9.992188 10.425781 17.507812 L 10.425781 24.507812 L 7.078125 24.507812 C 4.023438 24.507812 3.671875 24.492188 3.070312 24.371094 C 2.128906 24.171875 1.152344 23.632812 0.496094 22.9375 C -0.0234375 22.382812 -0.0078125 22.351562 0.0234375 24.035156 C 0.0625 25.425781 0.078125 25.578125 0.28125 26.335938 C 0.601562 27.535156 1.039062 28.425781 1.703125 29.222656 C 2.609375 30.316406 3.527344 30.929688 4.839844 31.339844 C 5.121094 31.417969 5.710938 31.453125 7.808594 31.46875 L 10.425781 31.507812 L 10.425781 38.484375 L 6.734375 38.460938 L 3.03125 38.4375 L 2.390625 38.179688 C 1.632812 37.871094 1.289062 37.648438 0.542969 36.980469 L 0 36.488281 L 0.03125 38.023438 C 0.0703125 39.449219 0.078125 39.609375 0.28125 40.335938 C 0.976562 42.894531 2.65625 44.71875 4.871094 45.316406 C 5.425781 45.46875 5.640625 45.476562 7.953125 45.507812 L 10.425781 45.539062 L 10.425781 52.75 C 10.425781 57.101562 10.398438 60.3125 10.359375 60.859375 C 10.320312 61.359375 10.191406 62.292969 10.078125 62.945312 C 9.558594 65.945312 8.625 68.207031 7.28125 69.671875 L 7.007812 69.96875 L 20.535156 69.96875 C 28.625 69.96875 34.671875 69.9375 35.558594 69.894531 C 37.121094 69.816406 40.601562 69.46875 41.382812 69.300781 C 41.632812 69.25 42.097656 69.179688 42.398438 69.132812 C 43.046875 69.035156 44.121094 68.808594 45.664062 68.414062 C 47.839844 67.867188 49.824219 67.183594 51.769531 66.316406 C 52.375 66.042969 54.121094 65.148438 54.585938 64.867188 C 54.832031 64.722656 55.128906 64.542969 55.238281 64.488281 C 55.550781 64.320312 56.070312 63.980469 56.832031 63.433594 C 57.207031 63.160156 57.585938 62.894531 57.664062 62.839844 C 58 62.613281 59.160156 61.640625 59.6875 61.148438 C 61.695312 59.289062 63.375 57.222656 64.679688 55.011719 C 64.863281 54.6875 65.105469 54.285156 65.207031 54.117188 C 65.472656 53.667969 66.558594 51.414062 66.664062 51.074219 C 66.710938 50.921875 66.777344 50.761719 66.808594 50.730469 C 67.015625 50.457031 68.214844 46.660156 68.359375 45.828125 C 68.40625 45.5625 68.433594 45.523438 68.632812 45.484375 C 68.761719 45.460938 70.625 45.460938 72.777344 45.476562 C 77.078125 45.507812 77.078125 45.507812 78.03125 45.949219 C 78.566406 46.199219 78.726562 46.3125 79.320312 46.851562 C 80.097656 47.550781 80.023438 47.664062 79.976562 45.910156 C 79.945312 44.878906 79.902344 44.246094 79.832031 43.988281 C 79.558594 42.996094 79.496094 42.789062 79.257812 42.289062 C 78.472656 40.566406 77.160156 39.335938 75.480469 38.75 L 74.824219 38.507812 L 72.152344 38.476562 L 69.488281 38.4375 L 69.519531 37.496094 C 69.550781 36.253906 69.550781 33.800781 69.511719 32.539062 L 69.480469 31.523438 L 73.046875 31.507812 C 76.105469 31.492188 76.671875 31.507812 77.007812 31.597656 C 78.015625 31.878906 78.695312 32.265625 79.527344 33.027344 L 79.992188 33.464844 L 79.992188 32.273438 C 79.992188 30.855469 79.921875 30.230469 79.632812 29.296875 C 79.0625 27.40625 77.945312 25.996094 76.34375 25.128906 C 75.304688 24.5625 75.238281 24.546875 71.664062 24.523438 C 69.566406 24.507812 68.472656 24.476562 68.414062 24.425781 C 68.367188 24.378906 68.328125 24.300781 68.328125 24.234375 C 68.328125 24.171875 68.207031 23.664062 68.046875 23.117188 C 66.175781 16.460938 62.679688 11.175781 57.566406 7.257812 C 56.871094 6.71875 55.167969 5.582031 54.480469 5.199219 C 54.214844 5.042969 53.929688 4.882812 53.855469 4.835938 C 53.519531 4.652344 51.59375 3.699219 51.113281 3.5 C 50.824219 3.371094 50.449219 3.210938 50.28125 3.144531 C 47.457031 1.914062 42.71875 0.75 39.105469 0.386719 C 38.511719 0.328125 37.726562 0.242188 37.367188 0.210938 C 35.734375 0.0234375 33.472656 0 20.617188 0 C 9.753906 0 7.023438 0.0234375 7.0625 0.0820312 Z M 33.519531 3.5625 C 36.222656 3.726562 37.886719 3.933594 39.832031 4.410156 C 45.769531 5.824219 49.945312 8.820312 52.976562 13.824219 C 53.257812 14.289062 54.441406 16.71875 54.617188 17.210938 C 55.457031 19.488281 55.863281 20.839844 56.222656 22.625 C 56.3125 23.058594 56.433594 23.640625 56.488281 23.914062 C 56.542969 24.179688 56.566406 24.425781 56.542969 24.453125 C 56.503906 24.484375 48.472656 24.5 38.679688 24.492188 L 20.878906 24.476562 L 20.855469 14.136719 C 20.847656 8.457031 20.855469 3.734375 20.878906 3.644531 L 20.910156 3.492188 L 26.601562 3.492188 C 29.71875 3.492188 32.839844 3.523438 33.519531 3.5625 Z M 57.320312 31.75 C 57.375 32.09375 57.375 37.96875 57.320312 38.257812 L 57.273438 38.476562 L 39.070312 38.460938 L 20.878906 38.4375 L 20.863281 35.023438 C 20.847656 33.148438 20.863281 31.589844 20.878906 31.554688 C 20.902344 31.515625 28.65625 31.492188 39.097656 31.492188 L 57.273438 31.492188 Z M 56.503906 45.5625 C 56.542969 45.683594 56.351562 46.675781 55.960938 48.285156 C 55.511719 50.09375 54.902344 51.921875 54.289062 53.273438 C 53.984375 53.964844 53.222656 55.460938 53.039062 55.742188 C 52.953125 55.871094 52.695312 56.28125 52.472656 56.644531 C 51.03125 58.914062 48.976562 60.980469 46.632812 62.507812 C 45.777344 63.054688 44.015625 63.988281 43.542969 64.132812 C 43.449219 64.160156 43.34375 64.207031 43.304688 64.238281 C 43.246094 64.289062 42.519531 64.5625 41.671875 64.867188 C 40.113281 65.421875 37.144531 66.023438 34.761719 66.273438 C 33.214844 66.425781 32.96875 66.4375 27.023438 66.4375 L 20.871094 66.4375 L 20.871094 45.554688 L 38.542969 45.523438 C 48.265625 45.507812 56.273438 45.484375 56.335938 45.46875 C 56.40625 45.460938 56.480469 45.507812 56.503906 45.5625 Z M 56.503906 45.5625"
+)
+
 st.set_page_config(page_title="Negative Stock Tool", page_icon="📦", layout="wide")
+
+if DIRHAM_FONT_URL:
+    st.markdown(
+        f"""<style>
+        @font-face {{
+            font-family: 'DirhamSign';
+            src: url('{DIRHAM_FONT_URL}') format('woff2');
+            unicode-range: U+20C3;
+            font-display: swap;
+        }}
+        html, body, [class*="st-"], [data-testid] {{
+            font-family: 'DirhamSign', var(--font), sans-serif;
+        }}
+        </style>""", unsafe_allow_html=True)
 
 # ==================== house settings ====================
 COMPANY = "AL MADINA HYPERMARKET"
@@ -52,6 +87,66 @@ MULT = re.compile(
     re.I,
 )
 SIZE = re.compile(r"\b\d+(?:\.\d+)?\s?(?:GM|G|KG|ML|LTR|L)\b", re.I)
+
+
+
+# ==================== display helpers ====================
+
+
+
+def dirham_svg(height_em=0.82):
+    """Inline SVG for the dirham sign. fill=currentColor, so it takes the
+    colour of whatever text it sits in — red on negatives, green on positives."""
+    return (f'<svg viewBox="0 0 80 70" height="{height_em}em" '
+            f'style="vertical-align:-0.04em;margin-right:0.22em" '
+            f'xmlns="http://www.w3.org/2000/svg" role="img" aria-label="AED">'
+            f'<path fill="currentColor" d="{DIRHAM_SVG_PATH}"/></svg>')
+
+
+def money_html(x, dp=2, colour=True):
+    """Money with the real symbol, for places that render HTML."""
+    try:
+        v = float(x)
+    except (TypeError, ValueError):
+        return ""
+    col = ("#ff6b6b" if v < 0 else "#2eb872" if v > 0 else "#9aa0a6") \
+        if colour else "inherit"
+    return (f'<span style="color:{col};white-space:nowrap">'
+            f'{dirham_svg()}{v:,.{dp}f}</span>')
+
+
+def stat_card(label, value_html, sub=""):
+    return (f'<div style="padding:.7rem .9rem;border:1px solid rgba(250,250,250,.2);'
+            f'border-radius:.5rem;background:rgba(250,250,250,.03)">'
+            f'<div style="font-size:.78rem;opacity:.65;margin-bottom:.25rem">{label}</div>'
+            f'<div style="font-size:1.5rem;font-weight:600;line-height:1.2">{value_html}</div>'
+            f'<div style="font-size:.75rem;opacity:.55;margin-top:.15rem">{sub}</div></div>')
+
+
+def money(x, dp=2, sign=False):
+    """AED 1,234.56 — negatives keep their minus sign."""
+    try:
+        v = float(x)
+    except (TypeError, ValueError):
+        return ""
+    s = f"{v:+,.{dp}f}" if sign else f"{v:,.{dp}f}"
+    return f"{AED} {s}"
+
+
+def colour_money(df, cols):
+    """Red for negative, green for positive, grey for zero."""
+    def style(v):
+        try:
+            v = float(v)
+        except (TypeError, ValueError):
+            return ""
+        if v < 0:
+            return "color: #ff6b6b; font-weight: 600"
+        if v > 0:
+            return "color: #2eb872; font-weight: 600"
+        return "color: #888"
+    live = [c for c in cols if c in df.columns]
+    return df.style.map(style, subset=live) if live else df.style
 
 
 # ==================== parsing ====================
@@ -788,10 +883,17 @@ with tab1:
     in_master = neg["bc"].isin(set(master["Item Barcode"]))
 
     c1, c2, c3, c4 = st.columns(4)
-    c1.metric("Negative lines", f"{len(neg):,}")
-    c2.metric("Negative value", f"{total:,.0f} AED")
-    c3.metric("Units short", f"{units:,.0f}")
-    c4.metric("Avg per line", f"{total/max(len(neg),1):,.1f} AED")
+    c1.markdown(stat_card("Negative lines", f"{len(neg):,}",
+                          f"{neg['category'].nunique()} categories"),
+                unsafe_allow_html=True)
+    c2.markdown(stat_card("Negative value", money_html(total, 0)),
+                unsafe_allow_html=True)
+    c3.markdown(stat_card("Units short", f"{units:,.0f}"),
+                unsafe_allow_html=True)
+    c4.markdown(stat_card("Avg per line",
+                          money_html(total / max(len(neg), 1), 1)),
+                unsafe_allow_html=True)
+    st.write("")
 
     # ---------- by group ----------
     if neg["group"].nunique() > 1:
@@ -800,8 +902,10 @@ with tab1:
              .reset_index().sort_values("Value"))
         cols = st.columns(len(g))
         for col, r in zip(cols, g.to_dict("records")):
-            col.metric(r["group"], f"{r['Value']:,.0f} AED",
-                       f"{int(r['Lines'])} lines", delta_color="off")
+            col.markdown(stat_card(r["group"], money_html(r["Value"], 0),
+                                   f"{int(r['Lines'])} lines"),
+                         unsafe_allow_html=True)
+        st.write("")
 
     # ---------- by category ----------
     st.subheader("By category")
@@ -822,13 +926,13 @@ with tab1:
         by_cat.rename(columns={"category": "Category"}),
         use_container_width=True, hide_index=True,
         column_config={
-            "Value": st.column_config.NumberColumn("Value (AED)", format="%.0f"),
+            "Value": st.column_config.NumberColumn("Value", format="AED %.0f"),
             "Units": st.column_config.NumberColumn(format="%.0f"),
             "Share %": st.column_config.ProgressColumn(
                 "Share", format="%.1f%%", min_value=0.0,
                 max_value=float(max(by_cat["Share %"].max(), 1))),
-            "Avg/line": st.column_config.NumberColumn(format="%.1f"),
-            "Worst line": st.column_config.NumberColumn(format="%.0f"),
+            "Avg/line": st.column_config.NumberColumn(format="AED %.1f"),
+            "Worst line": st.column_config.NumberColumn(format="AED %.0f"),
         })
 
     # ---------- shape of the problem ----------
@@ -845,7 +949,7 @@ with tab1:
                          float(neg.loc[m, "val"].sum()) / total * 100, 1)})
     st.dataframe(pd.DataFrame(rows), use_container_width=True, hide_index=True,
                  column_config={
-                     "Value": st.column_config.NumberColumn(format="%.0f"),
+                     "Value": st.column_config.NumberColumn(format="AED %.0f"),
                      "% of value": st.column_config.ProgressColumn(
                          format="%.1f%%", min_value=0.0, max_value=100.0)})
 
@@ -854,14 +958,14 @@ with tab1:
     q1, q2, q3 = st.columns(3)
     miss = neg[~in_master]
     q1.metric("Not in masterlist", f"{len(miss):,}",
-              f"{miss['val'].sum():,.0f} AED", delta_color="off")
+              money(miss["val"].sum(), 0), delta_color="off")
     frac = neg[(neg["qty"] % 1 != 0)]
     q2.metric("Fractional quantities", f"{len(frac):,}",
-              f"{frac['val'].sum():,.0f} AED", delta_color="off")
+              money(frac["val"].sum(), 0), delta_color="off")
     nocost = neg[neg["cost"].isna() | (neg["cost"] == 0)] \
         if "cost" in neg.columns else neg.iloc[0:0]
     q3.metric("No cost on file", f"{len(nocost):,}",
-              f"{nocost['val'].sum():,.0f} AED", delta_color="off")
+              money(nocost["val"].sum(), 0), delta_color="off")
 
     # ---------- category drill-down ----------
     st.subheader("Categories")
@@ -877,21 +981,22 @@ with tab1:
         t = find.strip().upper()
         hit = neg[neg["Item Name"].str.upper().str.contains(t, na=False)
                   | neg["bc"].str.upper().str.contains(t, na=False)]
-        st.info(f"{len(hit)} matching lines · {hit['val'].sum():,.0f} AED")
+        st.info(f"{len(hit)} matching lines · {money(hit['val'].sum(), 0)}")
 
     def item_table(df):
         cols = ["bc", "Item Name"] + ([itemno_col] if itemno_col else []) + \
                ["qty", "val"]
         names = {"bc": "ItemCode", "Item Name": "Item Name",
                  "qty": "Quantity", "val": "Stock Value"}
+        out = df.sort_values("val")[cols].rename(columns=names)
         st.dataframe(
-            df.sort_values("val")[cols].rename(columns=names),
+            colour_money(out, ["Quantity", "Stock Value"]),
             use_container_width=True, hide_index=True,
             column_config={
                 "ItemCode": st.column_config.TextColumn(width="medium"),
                 "Item Name": st.column_config.TextColumn(width="large"),
                 "Quantity": st.column_config.NumberColumn(format="%.2f"),
-                "Stock Value": st.column_config.NumberColumn(format="%.2f")})
+                "Stock Value": st.column_config.NumberColumn(format="AED %.2f")})
 
     if hit is not None and len(hit):
         item_table(hit)
@@ -909,15 +1014,15 @@ with tab1:
         sub = neg[neg["category"] == c]
         with st.expander(
                 f"{c}  ·  {int(row['Lines'])} lines  ·  "
-                f"{row['Units']:,.2f} qty  ·  {row['Value']:,.2f} AED"):
+                f"{row['Units']:,.2f} qty  ·  {money(row['Value'])}"):
             item_table(sub)
-            st.caption(f"Worst line {sub['val'].min():,.2f} AED  ·  "
-                       f"average {row['Avg/line']:,.1f} AED per line  ·  "
+            st.caption(f"Worst line {money(sub['val'].min())}  ·  "
+                       f"average {money(row['Avg/line'], 1)} per line  ·  "
                        f"{row['Share %']:.1f}% of the store total")
 
     if len(miss):
         with st.expander(f"Not in the masterlist — {len(miss)} dead codes  ·  "
-                         f"{miss['val'].sum():,.2f} AED"):
+                         f"{money(miss['val'].sum())}"):
             item_table(miss)
 
 
@@ -929,7 +1034,7 @@ def candidates_tab(neg, master, master_idx, neg_map,
               .agg(lines=("val", "size"), val=("val", "sum")))
     cats = sorted(neg["category"].dropna().unique())
     label = {c: f"{c}  ({int(counts.loc[c, 'lines'])} lines, "
-                f"{counts.loc[c, 'val']:,.0f} AED)" for c in cats}
+                f"{money(counts.loc[c, 'val'], 0)})" for c in cats}
 
     c1, c2 = st.columns([3, 2])
     picked = c1.multiselect(
@@ -1067,12 +1172,14 @@ def candidates_tab(neg, master, master_idx, neg_map,
                  else cand[~cand["use"]] if view == "Left out" else cand)
 
         st.dataframe(
-            shown[cols], use_container_width=True, hide_index=True, height=380,
+            colour_money(shown[cols], ["neg_val", "neg_qty", "cost_drift_pct"]),
+            use_container_width=True, hide_index=True, height=380,
             column_config={
                 "neg_desc": st.column_config.TextColumn("Negative item", width="large"),
                 "par_desc": st.column_config.TextColumn("Outer / source", width="large"),
                 "neg_qty": st.column_config.NumberColumn("Neg qty", width="small"),
-                "neg_val": st.column_config.NumberColumn("Neg value", format="%.2f",
+                "neg_val": st.column_config.NumberColumn("Neg value",
+                                                         format="AED %.2f",
                                                          width="small"),
                 "conv": st.column_config.NumberColumn("Conv", width="small"),
                 "outers_needed": st.column_config.NumberColumn("Outers", width="small"),
@@ -1326,12 +1433,13 @@ def build_tab(adj_date, prepared, checked, verified, txt_prefix, store):
             else:
                 st.success("TOTAL 0.00")
             st.dataframe(
-                pdf, use_container_width=True, hide_index=True,
+                colour_money(pdf, ["QTY", "VALUE"]),
+                use_container_width=True, hide_index=True,
                 column_config={
                     "OUTER BARCODE": st.column_config.TextColumn(width="medium"),
                     "SINGLE BARCODE": st.column_config.TextColumn(width="medium"),
                     "DESCRIPTION": st.column_config.TextColumn(width="large"),
-                    "VALUE": st.column_config.NumberColumn(format="%.2f"),
+                    "VALUE": st.column_config.NumberColumn(format="AED %.2f"),
                 })
             d1, d2 = st.columns(2)
             d1.download_button(f"⬇ ADJ_{n:03d}.xlsx", data, f"ADJ_{n:03d}.xlsx",
