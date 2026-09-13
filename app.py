@@ -22,7 +22,7 @@ st.set_page_config(page_title="Negative Stock Tool", page_icon="📦", layout="w
 COMPANY = "AL MADINA HYPERMARKET"
 BRANCH = "SHAMS AL MADINA HYPERMARKET LLC"
 COST_DP = 7
-PAIRS_PER_FILE = 7
+PAIRS_PER_FILE = 11       # 11 pairs = 22 rows per sheet
 BLANK_PAD = True          # pad each sheet out to PAIRS_PER_FILE ruled rows
 
 THIN = Side(style="thin")
@@ -179,6 +179,29 @@ def load_negatives(raw: bytes, sheet=0, header_row=None, mapping=None) -> pd.Dat
 
 
 # ==================== matching ====================
+SIZE_JOIN_SIZE = re.compile(
+    r"\d+(?:\.\d+)?\s?(?:GM|G|KG|ML|LTR|L)\s*(?:[+&]|PLUS|WITH|AND)\s*"
+    r"\d+(?:\.\d+)?\s?(?:GM|G|KG|ML|LTR|L)", re.I)
+FREE_QTY = re.compile(r"\b(?:\d+\s*)?(?:PCS|GM|G|ML)?\s*FREE\b", re.I)
+
+
+def is_combo(desc):
+    """A combo holds two DIFFERENT items in one pack: 100ML + 50ML.
+    Breaking it releases both, so a one-target break would be wrong.
+
+    Deliberately narrow: an ampersand inside a brand name (GLOW&LOVELY,
+    REPAIR&REGENERATE) is NOT a combo. Two distinct size tokens is the test."""
+    s = str(desc).upper()
+    sizes = {x.replace(" ", "") for x in SIZE.findall(s)}
+    if len(sizes) >= 2:
+        return True
+    if SIZE_JOIN_SIZE.search(s):
+        return True
+    if FREE_QTY.search(s) and len(sizes) >= 1 and re.search(r"[+&]", s):
+        return True
+    return False
+
+
 def toks(s, strip_mult=True):
     s = str(s).upper()
     sizes = {x.replace(" ", "") for x in SIZE.findall(s)}
@@ -198,11 +221,13 @@ def mult_of(s):
 
 
 @st.cache_data(show_spinner=False)
-def find_breaks(m: pd.DataFrame, d: pd.DataFrame, threshold: float) -> pd.DataFrame:
+def find_breaks(m: pd.DataFrame, d: pd.DataFrame, threshold: float,
+                skip_combo: bool = True):
     mm = m.copy()
     mm[["mult", "isml"]] = pd.DataFrame(
         mm["Item Name"].map(mult_of).tolist(), index=mm.index
     )
+    own_cost = dict(zip(mm["Item Barcode"], mm["cost"]))
     par = mm[(mm["stock"] > 0) & mm["isml"] & (mm["mult"] > 1)]
     P, inv = [], defaultdict(list)
     for r in par[["Item Barcode", "Item Name", "stock", "mult", "cost"]].to_dict("records"):
@@ -212,7 +237,7 @@ def find_breaks(m: pd.DataFrame, d: pd.DataFrame, threshold: float) -> pd.DataFr
         for w in t:
             inv[w].append(len(P) - 1)
 
-    out = []
+    out, combos = [], []
     for r in d.to_dict("records"):
         ct, cs = toks(r["Item Name"])
         if not ct:
@@ -232,6 +257,12 @@ def find_breaks(m: pd.DataFrame, d: pd.DataFrame, threshold: float) -> pd.DataFr
                 if ov > bs:
                     bs, best = ov, p
         if best and bs >= threshold:
+            if skip_combo and (is_combo(best[1]) or is_combo(r["Item Name"])):
+                combos.append(dict(
+                    neg_bc=r["bc"], neg_desc=r["Item Name"], neg_qty=r["qty"],
+                    neg_val=r["val"], par_bc=best[0], par_desc=best[1],
+                    why="combo pack — breaking it releases more than one item"))
+                continue
             need = math.ceil(abs(r["qty"]) / best[3])
             out.append(dict(
                 neg_bc=r["bc"], neg_desc=r["Item Name"],
@@ -239,8 +270,14 @@ def find_breaks(m: pd.DataFrame, d: pd.DataFrame, threshold: float) -> pd.DataFr
                 par_bc=best[0], par_desc=best[1], par_stock=best[2],
                 par_cost=best[6], conv=best[3], outers_needed=need,
                 covered=need <= best[2], score=round(bs, 2), kind="Bundle break",
+                own_cost=own_cost.get(r["bc"], 0.0),
+                derived_cost=round(best[6] / best[3], COST_DP),
+                cost_drift_pct=(
+                    round((best[6] / best[3] - own_cost.get(r["bc"], 0)) /
+                          own_cost[r["bc"]] * 100, 1)
+                    if own_cost.get(r["bc"]) else None),
             ))
-    return pd.DataFrame(out)
+    return pd.DataFrame(out), pd.DataFrame(combos)
 
 
 @st.cache_data(show_spinner=False)
@@ -248,6 +285,7 @@ def find_swaps(m: pd.DataFrame, d: pd.DataFrame, lo: float, hi: float,
                price_tol: float) -> pd.DataFrame:
     mm = m.copy()
     mm["isml"] = mm["Item Name"].astype(str).str.upper().str.contains(MULT.pattern, regex=True, na=False)
+    own_cost = dict(zip(mm["Item Barcode"], mm["cost"]))
     pos = mm[(mm["stock"] > 0) & (~mm["isml"])]
     P, inv = [], defaultdict(list)
     for r in pos[["Item Barcode", "Item Name", "stock", "mrp", "cost"]].to_dict("records"):
@@ -290,8 +328,14 @@ def find_swaps(m: pd.DataFrame, d: pd.DataFrame, lo: float, hi: float,
                 par_stock=best[2], par_cost=best[6], conv=1,
                 outers_needed=abs(r["qty"]), covered=True,
                 score=round(bs, 2), kind="Wrong sale",
+                own_cost=own_cost.get(r["bc"], 0.0),
+                derived_cost=round(best[6], COST_DP),
+                cost_drift_pct=(
+                    round((best[6] - own_cost.get(r["bc"], 0)) /
+                          own_cost[r["bc"]] * 100, 1)
+                    if own_cost.get(r["bc"]) else None),
             ))
-    return pd.DataFrame(out)
+    return pd.DataFrame(out), pd.DataFrame(combos)
 
 
 # ==================== sheet writer ====================
@@ -423,8 +467,12 @@ def build_sheet(lines, remarks, date_str, prepared, checked, verified) -> bytes:
     buf = io.BytesIO(); wb.save(buf); return buf.getvalue()
 
 
-def validate(row, master_idx, neg_map):
+def validate(row, master_idx, neg_map, drift_tol=15.0):
     out = []
+    dr = row.get("cost_drift_pct")
+    if dr is not None and abs(dr) > drift_tol:
+        out.append(f"cost drift {dr:+.0f}% — derived {row.get('derived_cost'):.4g} "
+                   f"vs own {row.get('own_cost'):.4g}; likely a wrong pair")
     src = master_idx.get(row["par_bc"])
     if src is None:
         return ["source barcode not in masterlist"]
@@ -464,6 +512,9 @@ with st.sidebar:
                              (0.55, 0.95), 0.05,
                              help="Similar but not identical")
     price_tol = st.slider("Wrong sale price tolerance", 0.05, 0.60, 0.25, 0.05)
+    drift_tol = st.slider("Max cost drift %", 2.0, 60.0, 15.0, 1.0,
+                          help="A real break barely moves the item's cost. "
+                               "A big drift usually means the pair is wrong.")
 
 if not (f_master and f_neg):
     st.info("Upload the masterlist and the negative stock report in the sidebar to start.")
@@ -573,128 +624,165 @@ with tab2:
     default = [c for c in cats
                if c in ("GROCERY FOOD", "GROCERY NON FOOD",
                         "HEALTH AND BEAUTY", "GARMENTS")]
-    pick_cats = st.multiselect("Categories", cats, default=default or cats)
-    c1, c2 = st.columns(2)
-    do_break = c1.checkbox("Find bundle breaks", True)
-    do_swap = c2.checkbox("Find wrong sales", True)
-    no_break_cats = st.multiselect(
+
+    c1, c2 = st.columns([3, 2])
+    pick_cats = c1.multiselect("Categories", cats, default=default or cats)
+    mode = c2.selectbox("What to look for",
+                        ["Bundle breaks only", "Wrong sales only", "Both"],
+                        index=0)
+    c3, c4 = st.columns([3, 2])
+    no_break_cats = c3.multiselect(
         "No bundle breaks in these categories", cats,
         default=[c for c in cats if c == "GARMENTS"],
-        help="Garments are wrong-sale only",
-    )
+        help="Garments are wrong-sale only")
+    c4.write("")
+    run = c4.button("Run matching", type="primary", use_container_width=True)
 
-    if st.button("Run matching", type="primary"):
+    if run:
         d = neg[neg["category"].isin(pick_cats)]
-        parts = []
+        parts, combos = [], pd.DataFrame()
         with st.spinner("Matching…"):
-            if do_break:
-                b = find_breaks(master, d[~d["category"].isin(no_break_cats)], br_thresh)
+            if mode in ("Bundle breaks only", "Both"):
+                b, combos = find_breaks(
+                    master, d[~d["category"].isin(no_break_cats)], br_thresh)
                 if len(b):
                     parts.append(b[b["covered"]])
-            if do_swap:
+            if mode in ("Wrong sales only", "Both"):
                 sw = find_swaps(master, d, sw_lo, sw_hi, price_tol)
                 if len(sw):
                     parts.append(sw)
         if parts:
             cand = pd.concat(parts, ignore_index=True)
             cand = cand.drop_duplicates("neg_bc", keep="first")
-            cand["problems"] = [
-                "; ".join(validate(r, master_idx, neg_map))
-                for r in cand.to_dict("records")
-            ]
+            cand["problems"] = ["; ".join(validate(r, master_idx, neg_map, drift_tol))
+                                for r in cand.to_dict("records")]
             cand["use"] = cand["problems"].eq("")
             st.session_state["cand"] = cand
+            st.session_state["combos"] = combos
+            st.session_state["batch"] = 0
         else:
             st.session_state["cand"] = pd.DataFrame()
+            st.session_state["combos"] = combos
 
     cand = st.session_state.get("cand")
+    combos = st.session_state.get("combos")
+
+    if combos is not None and len(combos):
+        with st.expander(f"⚠ {len(combos)} combo packs skipped "
+                         f"({combos['neg_val'].sum():,.0f} AED) — do these by hand"):
+            st.caption("A combo holds two different items, e.g. 100ML + 50ML. "
+                       "Breaking one releases both, so it needs two target lines. "
+                       "Use the Manual pair tab for these.")
+            st.dataframe(combos, use_container_width=True, hide_index=True)
+
     if cand is not None and len(cand):
-        c1, c2, c3 = st.columns(3)
-        c1.metric("Candidates", len(cand))
-        c2.metric("Value covered", f"{cand['neg_val'].sum():,.0f} AED")
-        c3.metric("Clean", int(cand["problems"].eq("").sum()))
-        st.dataframe(
-            cand.groupby(["category", "kind"])
-            .agg(Pairs=("neg_val", "size"), Value=("neg_val", "sum"))
-            .round(0).reset_index(),
-            use_container_width=True, hide_index=True,
-        )
+        m1, m2, m3, m4 = st.columns(4)
+        m1.metric("Candidates", len(cand))
+        m2.metric("Value covered", f"{cand['neg_val'].sum():,.0f} AED")
+        m3.metric("Clean", int(cand["problems"].eq("").sum()))
+        m4.metric("Ticked", int(cand["use"].sum()))
+
+        BASIC = ["use", "neg_desc", "neg_qty", "par_desc", "conv",
+                 "outers_needed", "cost_drift_pct", "problems"]
+        extra_opts = [c for c in cand.columns if c not in BASIC]
+        show_extra = st.multiselect("Add columns", extra_opts, default=[],
+                                    help="The preview stays compact by default")
+        cols = [c for c in BASIC if c in cand.columns] + show_extra
+
         st.caption("Untick anything you do not want. Check the physical shelf first.")
-        st.session_state["cand"] = st.data_editor(
-            cand, use_container_width=True, hide_index=True,
-            column_config={"use": st.column_config.CheckboxColumn("Use", width="small")},
-            disabled=[c for c in cand.columns if c != "use"],
+        edited = st.data_editor(
+            cand[cols], use_container_width=True, hide_index=True, height=380,
+            column_config={
+                "use": st.column_config.CheckboxColumn("✓", width="small"),
+                "neg_desc": st.column_config.TextColumn("Negative item", width="large"),
+                "par_desc": st.column_config.TextColumn("Outer / source", width="large"),
+                "neg_qty": st.column_config.NumberColumn("Neg qty", width="small"),
+                "conv": st.column_config.NumberColumn("Conv", width="small"),
+                "outers_needed": st.column_config.NumberColumn("Outers", width="small"),
+                "cost_drift_pct": st.column_config.NumberColumn(
+                    "Drift %", format="%.0f%%", width="small"),
+                "problems": st.column_config.TextColumn("Problems", width="medium"),
+            },
+            disabled=[c for c in cols if c != "use"],
         )
+        cand["use"] = edited["use"].values
+        st.session_state["cand"] = cand
     elif cand is not None:
-        st.warning("No candidates found. Try loosening the sliders in the sidebar.")
+        st.warning("No candidates. Loosen the sliders in the sidebar and run again.")
 
 # ---------- Build ----------
 with tab3:
     cand = st.session_state.get("cand")
     manual = st.session_state.get("manual", [])
-    if (cand is None or not len(cand)) and not manual:
+    pool = []
+    if cand is not None and len(cand):
+        pool = cand[cand["use"]].to_dict("records")
+    pool += manual
+
+    if not pool:
         st.info("Run matching first, or add a pair by hand.")
     else:
-        sel = cand[cand["use"]].to_dict("records") if cand is not None and len(cand) else []
-        sel += manual
-        st.write(f"**{len(sel)} pairs selected** — "
-                 f"{sum(abs(r['neg_val']) for r in sel):,.0f} AED, "
-                 f"{math.ceil(len(sel)/PAIRS_PER_FILE)} files")
-        remarks = st.text_input(
-            "Remarks",
-            "OUTER BREAK FOR NEGATIVE STOCK",
-        )
-        if st.button("Generate adjustment sheets", type="primary") and sel:
-            lines = [
-                Line(r["par_bc"], r["par_desc"],
-                     "KG" if r["conv"] > 1 else "PCS",
-                     r["outers_needed"], r["par_cost"],
-                     r["neg_bc"], r["neg_desc"], "PCS", r["conv"])
-                for r in sel
-            ]
-            work = []
-            zbuf = io.BytesIO()
-            with zipfile.ZipFile(zbuf, "w", zipfile.ZIP_DEFLATED) as z:
-                for i in range(0, len(lines), PAIRS_PER_FILE):
-                    chunk = lines[i:i + PAIRS_PER_FILE]
-                    name = f"ADJ_{i//PAIRS_PER_FILE + 1:03d}.xlsx"
-                    z.writestr(name, build_sheet(chunk, remarks, adj_date,
-                                                 prepared, checked, verified))
-                    for ln, r in zip(chunk, sel[i:i + PAIRS_PER_FILE]):
-                        a, b = ln.rows()
-                        work.append({
-                            "FILE": name, "OUTER BARCODE": a[0],
-                            "OUTER DESCRIPTION": a[1], "SINGLE BARCODE": b[0],
-                            "SINGLE DESCRIPTION": b[1], "CONV": ln.conv,
-                            "OUTER QTY": a[3], "NEW SINGLE QTY": b[3],
-                            "OLD NEGATIVE QTY": neg_map.get(b[0], 0),
-                            "COST OUTER": a[4], "COST SINGLE": b[4],
-                            "OUTER VALUE": a[5], "SINGLE VALUE": b[5],
-                            "DIFFERENCE": round(a[5] + b[5], 2),
-                            "REASON": r.get("kind", ""),
-                        })
-                wdf = pd.DataFrame(work)
-                for c in ("OUTER BARCODE", "SINGLE BARCODE"):
-                    wdf[c] = wdf[c].astype(str)
-                wb = io.BytesIO()
-                with pd.ExcelWriter(wb, engine="openpyxl") as xw:
-                    wdf.to_excel(xw, sheet_name="WORKING", index=False)
-                    sh = xw.sheets["WORKING"]
-                    for col in ("C", "D"):
-                        for cell in sh[col]:
-                            cell.number_format = "@"
-                    sh.column_dimensions["C"].width = 20
-                    sh.column_dimensions["D"].width = 20
-                z.writestr("WORKING_ALL.xlsx", wb.getvalue())
+        done = st.session_state.get("batch", 0)
+        left = len(pool) - done
+        c1, c2, c3 = st.columns(3)
+        c1.metric("Pairs selected", len(pool))
+        c2.metric("Already generated", done)
+        c3.metric("Remaining", max(left, 0))
 
-            bad = int((wdf["DIFFERENCE"].abs() > 0.01).sum())
-            if bad:
-                st.error(f"{bad} pairs do not net to zero — do not post these")
+        remarks = st.text_input("Remarks", "OUTER BREAK FOR NEGATIVE STOCK")
+        b1, b2 = st.columns([1, 1])
+        gen = b1.button(f"Generate next sheet ({min(PAIRS_PER_FILE, max(left,0))} pairs)",
+                        type="primary", disabled=left <= 0,
+                        use_container_width=True)
+        if b2.button("Start over", use_container_width=True):
+            st.session_state["batch"] = 0
+            st.session_state.pop("last_sheet", None)
+            st.rerun()
+
+        if gen:
+            chunk_rows = pool[done:done + PAIRS_PER_FILE]
+            lines = [Line(r["par_bc"], r["par_desc"],
+                          "OFR" if r["conv"] != 1 else "PCS",
+                          r["outers_needed"], r["par_cost"],
+                          r["neg_bc"], r["neg_desc"], "PCS", r["conv"])
+                     for r in chunk_rows]
+            n = done // PAIRS_PER_FILE + 1
+            data = build_sheet(lines, remarks, adj_date, prepared, checked, verified)
+            prev = []
+            for sl, (ln, r) in enumerate(zip(lines, chunk_rows), start=1):
+                a_, b_ = ln.rows()
+                prev.append({"SL": sl, "OUTER BARCODE": a_[0], "SINGLE BARCODE": "",
+                             "DESCRIPTION": a_[1], "UNIT": a_[2],
+                             "QTY": a_[3], "COST": a_[4], "VALUE": a_[5]})
+                prev.append({"SL": "", "OUTER BARCODE": "", "SINGLE BARCODE": b_[0],
+                             "DESCRIPTION": b_[1], "UNIT": b_[2],
+                             "QTY": b_[3], "COST": b_[4], "VALUE": b_[5]})
+            pdf = pd.DataFrame(prev)
+            st.session_state["last_sheet"] = (n, data, pdf,
+                                              round(pdf["VALUE"].sum(), 2))
+            st.session_state["batch"] = done + len(lines)
+            st.rerun()
+
+        if st.session_state.get("last_sheet"):
+            n, data, pdf, tot = st.session_state["last_sheet"]
+            st.subheader(f"ADJ_{n:03d}  —  {len(pdf)} rows")
+            if abs(tot) > 0.01:
+                st.error(f"TOTAL {tot:.2f} — does not net to zero, do not post")
             else:
-                st.success(f"{len(lines)} pairs, every file totals 0.00")
-            st.download_button("⬇ Download all sheets (zip)", zbuf.getvalue(),
-                               "adjustment_files.zip", "application/zip")
-            st.dataframe(wdf, use_container_width=True, hide_index=True)
+                st.success("TOTAL 0.00")
+            st.dataframe(
+                pdf, use_container_width=True, hide_index=True,
+                column_config={
+                    "OUTER BARCODE": st.column_config.TextColumn(width="medium"),
+                    "SINGLE BARCODE": st.column_config.TextColumn(width="medium"),
+                    "DESCRIPTION": st.column_config.TextColumn(width="large"),
+                    "VALUE": st.column_config.NumberColumn(format="%.2f"),
+                })
+            st.download_button(f"⬇ Download ADJ_{n:03d}.xlsx", data,
+                               f"ADJ_{n:03d}.xlsx",
+                               "application/vnd.openxmlformats-officedocument."
+                               "spreadsheetml.sheet",
+                               use_container_width=True)
 
 # ---------- Manual ----------
 with tab4:
