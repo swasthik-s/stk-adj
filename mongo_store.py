@@ -61,10 +61,41 @@ class MongoStore:
             self.runs.create_index([("at", DESCENDING)])
             self.batches.create_index([("at", DESCENDING)])
             self.batches.create_index("run_id")
+            self.db["snapshots"].create_index([("at", DESCENDING)])
         except PyMongoError:
             pass
 
     # ---------- writes ----------
+    def save_snapshot(self, *, totals, by_category, source=None, note=""):
+        """Called once per upload. A few hundred bytes — the point is the
+        curve over time, so you can show whether the negative is falling."""
+        doc = {
+            "at": datetime.now(timezone.utc),
+            "kind": "snapshot",
+            "totals": totals,
+            "by_category": by_category,
+            "source": source or {},
+            "note": note,
+        }
+        try:
+            return True, str(self.db["snapshots"].insert_one(doc).inserted_id)
+        except PyMongoError as e:
+            return False, f"{type(e).__name__}"
+
+    def list_snapshots(self, limit=200):
+        try:
+            return list(self.db["snapshots"].find({}, {"by_category": 0})
+                        .sort("at", DESCENDING).limit(limit))
+        except PyMongoError:
+            return []
+
+    def get_snapshot(self, _id):
+        from bson import ObjectId
+        try:
+            return self.db["snapshots"].find_one({"_id": ObjectId(_id)})
+        except PyMongoError:
+            return None
+
     def save_run(self, *, categories, mode, settings, candidates_df,
                  combos_df=None, note=""):
         """Called automatically after every matching run."""
