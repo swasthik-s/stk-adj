@@ -788,18 +788,18 @@ def candidates_tab(neg, master, master_idx, neg_map,
                 any(not (x.startswith("over-clears") or x.startswith("under-clears"))
                     for x in p) for p in probs]
             clean = ~cand["blocked"]
-            # rank within the unblocked rows, so you always get a full sheet
-            rank = cand["neg_val"].abs().where(clean).rank(ascending=False,
-                                                           method="first")
-            cand["use"] = clean & (rank <= PAIRS_PER_FILE)
+            cand["use"] = clean          # everything usable; filter by value below
             st.session_state["cand"] = cand
             st.session_state["combos"] = combos
             st.session_state["batch"] = 0
+            st.session_state["sel_version"] = st.session_state.get(
+                "sel_version", 0) + 1
             status.update(label=f"{len(cand)} candidates", state="complete")
         else:
             status.update(label="No candidates", state="complete")
             st.session_state["cand"] = pd.DataFrame()
             st.session_state["combos"] = combos
+        st.rerun()               # one reload so Verify and Build see the result
 
     cand = st.session_state.get("cand")
     combos = st.session_state.get("combos")
@@ -821,29 +821,33 @@ def candidates_tab(neg, master, master_idx, neg_map,
         m3.metric("No blockers", int(clean_mask.sum()))
         m4.metric("Ticked", int(cand["use"].sum()))
 
-        q1, q2, q3, q4 = st.columns([1.2, 1.2, 1.2, 1.4])
-        topn = q1.number_input("Top N by value", min_value=1,
-                               max_value=len(cand), value=min(11, len(cand)),
-                               step=1, label_visibility="visible")
-        q2.write(""); q3.write(""); q4.write("")
-        if q2.button(f"Select top {int(topn)}", use_container_width=True):
-            order = (cand["neg_val"].abs().where(clean_mask)
-                     .rank(ascending=False, method="first"))
-            cand["use"] = clean_mask & (order <= int(topn))
+        vals = cand.loc[clean_mask, "neg_val"].abs()
+        vmax = float(vals.max()) if len(vals) else 0.0
+
+        q1, q2, q3 = st.columns([2, 1.2, 1.2])
+        thresh = q1.number_input(
+            "Only select pairs worth at least (AED)", min_value=0.0,
+            max_value=max(vmax, 1.0), value=0.0, step=5.0,
+            help="0 selects every unblocked pair. Raise it to skip the small ones.")
+        q2.write(""); q3.write("")
+        if q2.button("Apply value filter", use_container_width=True):
+            cand["use"] = clean_mask & (cand["neg_val"].abs() >= thresh)
             st.session_state["cand"] = cand
-        if q3.button("Select all clean", use_container_width=True):
-            cand["use"] = clean_mask
-            st.session_state["cand"] = cand
-        if q4.button("Clear all", use_container_width=True):
+            st.session_state["sel_version"] = st.session_state.get("sel_version", 0) + 1
+            st.session_state["batch"] = 0
+            st.rerun(scope="fragment")
+        if q3.button("Clear all", use_container_width=True):
             cand["use"] = False
             st.session_state["cand"] = cand
+            st.session_state["sel_version"] = st.session_state.get("sel_version", 0) + 1
+            st.rerun(scope="fragment")
 
+        picked = cand.loc[cand["use"], "neg_val"].abs()
         st.caption(
-            f"Sorted highest negative value first. "
-            f"Top {int(topn)} unblocked pairs are worth "
-            f"{cand.loc[clean_mask, 'neg_val'].abs().nlargest(int(topn)).sum():,.0f} AED "
-            f"of {cand.loc[clean_mask, 'neg_val'].abs().sum():,.0f} unblocked total. "
-            f"Over-clear notes are normal odd-quantity overshoot, not blockers."
+            f"Sorted highest value first. **{len(picked)} pairs ticked** worth "
+            f"{picked.sum():,.0f} AED — that is {math.ceil(len(picked)/PAIRS_PER_FILE)} "
+            f"sheet(s) of up to {PAIRS_PER_FILE} pairs each, filled in value order. "
+            f"Over-clear notes are normal overshoot, not blockers."
         )
 
         BASIC = ["use", "neg_desc", "neg_qty", "neg_val", "par_desc", "conv",
@@ -872,7 +876,7 @@ def candidates_tab(neg, master, master_idx, neg_map,
                     "problems": st.column_config.TextColumn("Problems", width="medium"),
                 },
                 disabled=[c for c in cols if c != "use"],
-                key="cand_editor",
+                key=f"cand_editor_{st.session_state.get('sel_version', 0)}",
             )
             applied = st.form_submit_button("Apply ticks", type="primary")
 
