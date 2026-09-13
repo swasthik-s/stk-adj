@@ -356,7 +356,8 @@ class Line:
                 (self.sng_bc, self.sng_desc, self.sng_unit, sq, sc, sv)]
 
 
-def build_sheet(lines, remarks, date_str, prepared, checked, verified) -> bytes:
+def build_sheet(lines, remarks, date_str, prepared, checked, verified,
+                live=True) -> bytes:
     wb = Workbook(); ws = wb.active; ws.title = "ADJUSTMENT"
     ncol = len(HEADERS); last = get_column_letter(ncol)
     for i, w in enumerate(WIDTHS, start=1):
@@ -390,6 +391,10 @@ def build_sheet(lines, remarks, date_str, prepared, checked, verified) -> bytes:
         cell.alignment = CENTER; cell.border = BOX
 
     row = 7; first = row
+    if live:
+        h = ws.cell(row=6, column=10, value="CONV")
+        h.fill = RED; h.font = WHITE_BOLD; h.alignment = CENTER
+        ws.column_dimensions["J"].width = 8
 
     def rule(r):
         for c in range(1, ncol + 1):
@@ -413,15 +418,26 @@ def build_sheet(lines, remarks, date_str, prepared, checked, verified) -> bytes:
         ws.cell(row=row, column=5, value="OFR" if ln.conv != 1 else ounit)
         ws.cell(row=row, column=6, value=oqty)
         ws.cell(row=row, column=7, value=ocost)
-        ws.cell(row=row, column=8, value=oval)
+        orow = row
+        ws.cell(row=row, column=8,
+                value=f"=ROUND(F{orow}*G{orow},2)" if live else oval)
         rule(row); row += 1
         # single row - barcode in the SINGLE column only
         ws.cell(row=row, column=3, value=str(sbc))
         ws.cell(row=row, column=4, value=sdesc)
         ws.cell(row=row, column=5, value=sunit)
-        ws.cell(row=row, column=6, value=sqty)
-        ws.cell(row=row, column=7, value=scost)
-        ws.cell(row=row, column=8, value=sval)
+        cv = ln.conv
+        if live:
+            # conv lives in its own cell (column J, outside the print area) so a
+            # wrong pack size is a number to fix, not a formula to rewrite.
+            ws.cell(row=orow, column=10, value=cv).number_format = "0.####"
+            ws.cell(row=row, column=6, value=f"=ROUND(ABS(F{orow})*J{orow},3)")
+            ws.cell(row=row, column=7, value=f"=IF(J{orow}=0,0,ROUND(G{orow}/J{orow},7))")
+            ws.cell(row=row, column=8, value=f"=-ROUND(F{orow}*G{orow},2)")
+        else:
+            ws.cell(row=row, column=6, value=sqty)
+            ws.cell(row=row, column=7, value=scost)
+            ws.cell(row=row, column=8, value=sval)
         rule(row); row += 1
         ws.merge_cells(start_row=start, start_column=1, end_row=row - 1, end_column=1)
         c = ws.cell(row=start, column=1, value=sl)
@@ -491,6 +507,100 @@ def validate(row, master_idx, neg_map, drift_tol=15.0):
     if str(src.get("Is Active", "")).strip() == "Unchecked":
         out.append("source item inactive")
     return out
+
+
+
+
+# ==================== verification round-trip ====================
+VERIFY_COLS = ["ROW", "KEY", "SECTION", "TYPE", "SINGLE BARCODE",
+               "NEGATIVE ITEM", "NEG QTY", "OUTER BARCODE", "OUTER ITEM",
+               "OUTER STOCK", "CONV", "OUTERS TO BREAK", "NEW SINGLE QTY",
+               "COST DRIFT %", "SYSTEM FLAGS", "VERIFIED (Y/N)",
+               "ACTUAL SHELF QTY", "STAFF REMARKS"]
+
+
+def pair_key(r):
+    return f"{r['neg_bc']}|{r['par_bc']}"
+
+
+def make_verification_book(cand: pd.DataFrame) -> bytes:
+    """One sheet per section, numbered serially, with a Y/N column for staff."""
+    from openpyxl.worksheet.datavalidation import DataValidation
+    wb = Workbook(); wb.remove(wb.active)
+    n = 0
+    for section, grp in cand.groupby("category", sort=True):
+        ws = wb.create_sheet(str(section)[:28] or "OTHER")
+        ws.merge_cells(start_row=1, start_column=1, end_row=1,
+                       end_column=len(VERIFY_COLS))
+        ws["A1"] = f"{COMPANY} — NEGATIVE STOCK VERIFICATION — {section}"
+        ws["A1"].font = Font(size=13, bold=True, color="C00000")
+        ws["A1"].alignment = CENTER
+        ws.merge_cells(start_row=2, start_column=1, end_row=2,
+                       end_column=len(VERIFY_COLS))
+        ws["A2"] = ("Check the shelf. Put Y only if the pairing is correct and the "
+                    "outer is physically there. Put N or leave blank to reject. "
+                    "Do not change any other column.")
+        ws["A2"].font = Font(italic=True)
+        for c, h in enumerate(VERIFY_COLS, start=1):
+            cell = ws.cell(row=3, column=c, value=h)
+            cell.fill = RED; cell.font = WHITE_BOLD
+            cell.alignment = Alignment("center", "center", wrap_text=True)
+            cell.border = BOX
+        widths = [7, 30, 18, 13, 18, 40, 10, 18, 40, 12, 7, 12, 13, 11, 30, 14, 14, 26]
+        for i, w in enumerate(widths, start=1):
+            ws.column_dimensions[get_column_letter(i)].width = w
+        ws.row_dimensions[3].height = 34
+
+        r = 4
+        for rec in grp.to_dict("records"):
+            n += 1
+            vals = [n, pair_key(rec), rec.get("category", ""), rec.get("kind", ""),
+                    str(rec["neg_bc"]), rec["neg_desc"], rec["neg_qty"],
+                    str(rec["par_bc"]), rec["par_desc"], rec.get("par_stock", ""),
+                    rec.get("conv", 1), rec.get("outers_needed", ""),
+                    round(abs(rec.get("outers_needed", 0)) * rec.get("conv", 1), 3),
+                    rec.get("cost_drift_pct", ""), rec.get("problems", ""), "", "", ""]
+            for c, v in enumerate(vals, start=1):
+                cell = ws.cell(row=r, column=c, value=v); cell.border = BOX
+                if c in (5, 8):
+                    cell.number_format = "@"
+            ws.cell(row=r, column=16).fill = PatternFill("solid", fgColor="FFF2CC")
+            ws.cell(row=r, column=17).fill = PatternFill("solid", fgColor="FFF2CC")
+            ws.cell(row=r, column=18).fill = PatternFill("solid", fgColor="FFF2CC")
+            r += 1
+
+        dv = DataValidation(type="list", formula1='"Y,N"', allow_blank=True)
+        ws.add_data_validation(dv)
+        dv.add(f"P4:P{r-1}")
+        ws.freeze_panes = "A4"
+        ws.auto_filter.ref = f"A3:{get_column_letter(len(VERIFY_COLS))}{r-1}"
+        ws.column_dimensions["B"].hidden = True      # KEY, needed on re-upload
+        ws.print_area = f"A1:{get_column_letter(len(VERIFY_COLS))}{r-1}"
+        ws.page_setup.orientation = "landscape"
+        ws.page_setup.fitToWidth = 1
+        ws.sheet_properties.pageSetUpPr.fitToPage = True
+
+    buf = io.BytesIO(); wb.save(buf); return buf.getvalue()
+
+
+def read_verification(raw: bytes) -> pd.DataFrame:
+    """Read back every sheet, keep the rows marked Y."""
+    book = pd.read_excel(io.BytesIO(raw), sheet_name=None, header=2, dtype=str)
+    out = []
+    for name, t in book.items():
+        if "KEY" not in t.columns or "VERIFIED (Y/N)" not in t.columns:
+            continue
+        t = t[t["KEY"].notna()]
+        t["_verified"] = (t["VERIFIED (Y/N)"].astype(str).str.strip().str.upper()
+                          .isin(["Y", "YES", "OK", "1", "TRUE"]))
+        t["_sheet"] = name
+        out.append(t[["ROW", "KEY", "_verified", "_sheet",
+                      "ACTUAL SHELF QTY", "STAFF REMARKS"]])
+    if not out:
+        raise ValueError("No verification sheets found — is this the exported file?")
+    v = pd.concat(out, ignore_index=True)
+    v["ROW"] = pd.to_numeric(v["ROW"], errors="coerce")
+    return v.sort_values("ROW")
 
 
 # ==================== UI ====================
@@ -586,8 +696,8 @@ except Exception as err:
 master_idx = master.set_index("Item Barcode").to_dict("index")
 neg_map = dict(zip(neg["bc"], neg["qty"]))
 
-tab1, tab2, tab3, tab4 = st.tabs(
-    ["Overview", "Candidates", "Build sheets", "Manual pair"]
+tab1, tab2, tabV, tab3, tab4 = st.tabs(
+    ["Overview", "Candidates", "Verify", "Build sheets", "Manual pair"]
 )
 
 # ---------- Overview ----------
@@ -710,6 +820,75 @@ with tab2:
     elif cand is not None:
         st.warning("No candidates. Loosen the sliders in the sidebar and run again.")
 
+# ---------- Verify ----------
+with tabV:
+    st.caption("The app keeps nothing after you close it. This sheet is the record — "
+               "export it, let the section staff check the shelf, upload it back.")
+    cand = st.session_state.get("cand")
+
+    st.subheader("1. Export for the sections")
+    if cand is None or not len(cand):
+        st.info("Run matching first.")
+    else:
+        st.write(f"{len(cand)} pairs across "
+                 f"{cand['category'].nunique()} sections, numbered serially, "
+                 f"one sheet per section.")
+        st.download_button(
+            "⬇ Download verification sheet",
+            make_verification_book(cand),
+            f"VERIFICATION_{adj_date.replace('-', '')}.xlsx",
+            "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+            use_container_width=True)
+
+    st.divider()
+    st.subheader("2. Upload it back once signed off")
+    up = st.file_uploader("Verified sheet", type=["xlsx"], key="verified_up")
+    if up is not None:
+        try:
+            v = read_verification(up.getvalue())
+        except Exception as e:
+            st.error(f"Could not read it: {e}")
+            v = None
+        if v is not None:
+            yes = int(v["_verified"].sum())
+            c1, c2, c3 = st.columns(3)
+            c1.metric("Rows in sheet", len(v))
+            c2.metric("Verified Y", yes)
+            c3.metric("Rejected / blank", len(v) - yes)
+            st.session_state["verified"] = v
+            if cand is not None and len(cand):
+                cand = cand.copy()
+                cand["KEY"] = [pair_key(r) for r in cand.to_dict("records")]
+                ok = set(v.loc[v["_verified"], "KEY"])
+                order = dict(zip(v["KEY"], v["ROW"]))
+                cand["use"] = cand["KEY"].isin(ok)
+                cand["serial"] = cand["KEY"].map(order)
+                cand = cand.sort_values("serial", na_position="last")
+                st.session_state["cand"] = cand
+                st.session_state["batch"] = 0
+                st.success(f"{int(cand['use'].sum())} pairs ticked and put in "
+                           f"serial order. Go to Build sheets.")
+                st.dataframe(
+                    cand.loc[cand["use"],
+                             ["serial", "neg_desc", "neg_qty", "par_desc",
+                              "conv", "outers_needed"]],
+                    use_container_width=True, hide_index=True)
+            else:
+                st.warning("Run matching first so the verified rows can be matched "
+                           "back to candidates.")
+
+    st.divider()
+    st.subheader("Where the tracking lives")
+    st.markdown(
+        "- The **verification sheet** is the saved state. It carries a hidden KEY "
+        "column — do not delete it or the upload cannot match rows back.\n"
+        "- Keep each dated sheet in a shared folder. That folder is your audit "
+        "trail: who verified what, on which day, with shelf quantities and remarks.\n"
+        "- Nothing is stored on the server. On Streamlit Cloud a database file "
+        "would be wiped whenever the app sleeps or redeploys, so a file you hold "
+        "is safer than one the app holds."
+    )
+
 # ---------- Build ----------
 with tab3:
     cand = st.session_state.get("cand")
@@ -729,25 +908,53 @@ with tab3:
         c2.metric("Already generated", done)
         c3.metric("Remaining", max(left, 0))
 
+        o1, o2 = st.columns([2, 2])
+        order = o1.selectbox(
+            "Order the pairs by",
+            ["Value, highest first", "Section then value", "As verified (serial)"],
+            help="Value first clears the most money in the fewest sheets. "
+                 "Section keeps one staff member in one aisle.")
+        live_mode = o2.checkbox(
+            "Live formulas (single side recalculates)", True,
+            help="If staff correct the outer quantity, the single qty, cost and "
+                 "value follow automatically and the total stays 0.00.")
+        if order == "Value, highest first":
+            pool = sorted(pool, key=lambda r: -abs(r.get("neg_val", 0)))
+        elif order == "Section then value":
+            pool = sorted(pool, key=lambda r: (str(r.get("category", "")),
+                                               -abs(r.get("neg_val", 0))))
+        elif "serial" in order:
+            pool = sorted(pool, key=lambda r: (r.get("serial") or 1e9))
+
         remarks = st.text_input("Remarks", "OUTER BREAK FOR NEGATIVE STOCK")
-        b1, b2 = st.columns([1, 1])
-        gen = b1.button(f"Generate next sheet ({min(PAIRS_PER_FILE, max(left,0))} pairs)",
-                        type="primary", disabled=left <= 0,
-                        use_container_width=True)
-        if b2.button("Start over", use_container_width=True):
+        r1, r2, r3 = st.columns([1, 1, 2])
+        start_at = r1.number_input("Start at serial", min_value=1,
+                                   max_value=max(len(pool), 1),
+                                   value=min(done + 1, max(len(pool), 1)))
+        count = r2.number_input("How many pairs", min_value=1,
+                                max_value=PAIRS_PER_FILE,
+                                value=min(PAIRS_PER_FILE,
+                                          max(len(pool) - int(start_at) + 1, 1)))
+        r3.write(""); r3.write("")
+        gen = r3.button(f"Generate serial {int(start_at)}–"
+                        f"{int(start_at) + int(count) - 1}",
+                        type="primary", use_container_width=True)
+        if st.button("Reset counter"):
             st.session_state["batch"] = 0
             st.session_state.pop("last_sheet", None)
             st.rerun()
 
         if gen:
-            chunk_rows = pool[done:done + PAIRS_PER_FILE]
+            s0 = int(start_at) - 1
+            chunk_rows = pool[s0:s0 + int(count)]
             lines = [Line(r["par_bc"], r["par_desc"],
                           "OFR" if r["conv"] != 1 else "PCS",
                           r["outers_needed"], r["par_cost"],
                           r["neg_bc"], r["neg_desc"], "PCS", r["conv"])
                      for r in chunk_rows]
-            n = done // PAIRS_PER_FILE + 1
-            data = build_sheet(lines, remarks, adj_date, prepared, checked, verified)
+            n = s0 // PAIRS_PER_FILE + 1
+            data = build_sheet(lines, remarks, adj_date, prepared, checked,
+                               verified, live=live_mode)
             prev = []
             for sl, (ln, r) in enumerate(zip(lines, chunk_rows), start=1):
                 a_, b_ = ln.rows()
@@ -760,7 +967,7 @@ with tab3:
             pdf = pd.DataFrame(prev)
             st.session_state["last_sheet"] = (n, data, pdf,
                                               round(pdf["VALUE"].sum(), 2))
-            st.session_state["batch"] = done + len(lines)
+            st.session_state["batch"] = max(done, s0 + len(lines))
             st.rerun()
 
         if st.session_state.get("last_sheet"):
