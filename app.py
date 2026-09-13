@@ -12,6 +12,11 @@ from dataclasses import dataclass
 
 import pandas as pd
 import streamlit as st
+
+try:
+    from mongo_store import MongoStore
+except Exception:
+    MongoStore = None
 from openpyxl import Workbook
 from openpyxl.styles import Alignment, Border, Font, PatternFill, Side
 from openpyxl.utils import get_column_letter
@@ -633,6 +638,25 @@ def read_verification(raw: bytes) -> pd.DataFrame:
     return v.sort_values("ROW")
 
 
+@st.cache_resource(show_spinner=False)
+def get_store():
+    """One MongoDB connection for the whole session, or None if not set up."""
+    if MongoStore is None:
+        return None
+    try:
+        cfg = st.secrets["mongo"]
+    except Exception:
+        return None
+    if not cfg.get("uri"):
+        return None
+    try:
+        s = MongoStore(cfg["uri"], cfg.get("db", "stockadj"))
+        s.ensure_indexes()
+        return s
+    except Exception:
+        return None
+
+
 # ==================== UI ====================
 st.title("📦 Negative Stock Adjustment Tool")
 
@@ -728,8 +752,9 @@ except Exception as err:
 master_idx = master.set_index("Item Barcode").to_dict("index")
 neg_map = dict(zip(neg["bc"], neg["qty"]))
 
-tab1, tab2, tabV, tab3, tab4 = st.tabs(
-    ["Overview", "Candidates", "Verify", "Build sheets", "Manual pair"]
+store = get_store()
+tab1, tab2, tabV, tab3, tab4, tabA = st.tabs(
+    ["Overview", "Candidates", "Verify", "Build sheets", "Manual pair", "Archive"]
 )
 
 # ---------- Overview ----------
@@ -826,6 +851,16 @@ def candidates_tab(neg, master, master_idx, neg_map,
             st.session_state["batch"] = 0
             st.session_state["sel_version"] = st.session_state.get(
                 "sel_version", 0) + 1
+            store = get_store()
+            if store is not None:
+                okr, rid = store.save_run(
+                    categories=pick_cats, mode=mode,
+                    settings={"break_threshold": br_thresh,
+                              "swap_window": [sw_lo, sw_hi],
+                              "price_tol": price_tol, "drift_tol": drift_tol},
+                    candidates_df=cand, combos_df=combos)
+                if okr:
+                    st.session_state["run_id"] = rid
             status.update(label=f"{len(cand)} candidates", state="complete")
         else:
             status.update(label="No candidates", state="complete")
@@ -984,7 +1019,7 @@ with tabV:
 
 # ---------- Build ----------
 @st.fragment
-def build_tab(adj_date, prepared, checked, verified, txt_prefix):
+def build_tab(adj_date, prepared, checked, verified, txt_prefix, store):
     cand = st.session_state.get("cand")
     manual = st.session_state.get("manual", [])
     pool = []
@@ -1082,9 +1117,23 @@ def build_tab(adj_date, prepared, checked, verified, txt_prefix):
                         use_container_width=True, hide_index=True)
             else:
                 st.caption("Import files net to exactly 0.00 as well.")
+            st.session_state["last_zip"] = zbuf.getvalue()
             st.download_button("⬇ Download everything (zip)", zbuf.getvalue(),
                                f"ADJUSTMENTS_{adj_date.replace('-', '')}.zip",
                                "application/zip", use_container_width=True)
+
+        if store and st.session_state.get("last_zip"):
+            if st.button("💾 Save this batch to the database",
+                         use_container_width=True):
+                ok, res = store.save_batch(
+                    label=f"{adj_date} · {len(pool)} pairs",
+                    files={f"ADJUSTMENTS_{adj_date.replace('-', '')}.zip":
+                           st.session_state["last_zip"]},
+                    meta={"remarks": remarks, "pairs": len(pool),
+                          "per_sheet": int(per)},
+                    run_id=st.session_state.get("run_id"))
+                (st.success if ok else st.error)(
+                    "Saved." if ok else f"Not saved: {res}")
 
         st.divider()
         st.caption("Or build one sheet at a time to print and hand over:")
@@ -1161,6 +1210,17 @@ def build_tab(adj_date, prepared, checked, verified, txt_prefix):
                 st.warning(f"Import file residual {rep['net']:+.2f} AED on "
                            f"{len(rep['rows'])} pair(s) — uneven conversion. "
                            f"The Excel sheet itself is exact.")
+            if store:
+                if st.button(f"💾 Save ADJ_{n:03d} to the database",
+                             use_container_width=True):
+                    ok, res = store.save_batch(
+                        label=f"{adj_date} · ADJ_{n:03d}",
+                        files={f"ADJ_{n:03d}.xlsx": data,
+                               f"ADJ_{n:03d}.txt": txt},
+                        meta={"remarks": remarks, "pairs": len(pdf) // 2},
+                        run_id=st.session_state.get("run_id"))
+                    (st.success if ok else st.error)(
+                        "Saved." if ok else f"Not saved: {res}")
             with st.expander("Preview the import file"):
                 st.code(txt.decode(), language="text")
                 if rep["rows"]:
@@ -1172,7 +1232,88 @@ with tab2:
                    br_thresh, sw_lo, sw_hi, price_tol, drift_tol)
 
 with tab3:
-    build_tab(adj_date, prepared, checked, verified, txt_prefix)
+    build_tab(adj_date, prepared, checked, verified, txt_prefix, store)
+
+
+with tabA:
+    if store is None:
+        st.info("No database configured. Every run and every generated sheet "
+                "can be kept if you add this to your secrets:")
+        st.code('[mongo]\nuri = "mongodb+srv://user:password@cluster0.xxxxx.'
+                'mongodb.net/?retryWrites=true&w=majority"\ndb  = "stockadj"',
+                language="toml")
+        st.caption("MongoDB Atlas M0 is free and gives 512 MB — a generated "
+                   "sheet is about 7 KB. Streamlit Cloud has no fixed outbound "
+                   "IP, so Atlas Network Access has to allow 0.0.0.0/0. That "
+                   "makes the password the only barrier, so use a long one and "
+                   "give the user access to this database only.")
+    else:
+        ok, msg = store.check()
+        (st.success if ok else st.error)(msg)
+        if ok:
+            sub1, sub2 = st.tabs(["Saved batches", "Run history"])
+
+            with sub1:
+                batches = store.list_batches()
+                if not batches:
+                    st.caption("Nothing saved yet. Generate sheets, then press "
+                               "Save on the Build tab.")
+                for b in batches:
+                    when = b["at"].strftime("%Y-%m-%d %H:%M")
+                    with st.expander(f"{b['label']}  ·  {when}  ·  "
+                                     f"{b['n_files']} file(s), "
+                                     f"{b['bytes']/1024:.0f} KB"):
+                        meta = b.get("meta", {})
+                        if meta:
+                            st.caption(" · ".join(f"{k}: {v}"
+                                                  for k, v in meta.items()))
+                        for f in b["files"]:
+                            data = store.get_file(str(b["_id"]), f["name"])
+                            if data is None:
+                                continue
+                            mime = ("text/plain" if f["name"].endswith(".txt")
+                                    else "application/zip"
+                                    if f["name"].endswith(".zip")
+                                    else "application/vnd.openxmlformats-"
+                                         "officedocument.spreadsheetml.sheet")
+                            st.download_button(
+                                f"⬇ {f['name']}  ({f['size']/1024:.0f} KB)",
+                                data, f["name"], mime,
+                                key=f"dl_{b['_id']}_{f['name']}",
+                                use_container_width=True)
+                            if f["name"].endswith(".txt"):
+                                st.code(data.decode("ascii", "ignore"),
+                                        language="text")
+
+            with sub2:
+                runs = store.list_runs()
+                if not runs:
+                    st.caption("No runs recorded yet.")
+                else:
+                    st.dataframe(pd.DataFrame([{
+                        "When": r["at"].strftime("%Y-%m-%d %H:%M"),
+                        "Categories": ", ".join(r.get("categories", [])),
+                        "Mode": r.get("mode", ""),
+                        "Candidates": r.get("n_candidates", 0),
+                        "Value": round(r.get("value", 0), 2),
+                        "Drift tol": r.get("settings", {}).get("drift_tol"),
+                    } for r in runs]), use_container_width=True, hide_index=True)
+                    pick = st.selectbox(
+                        "Reopen a run",
+                        [f"{r['at'].strftime('%Y-%m-%d %H:%M')} — "
+                         f"{r.get('n_candidates', 0)} candidates" for r in runs])
+                    if st.button("Load this run's candidates"):
+                        r = runs[[f"{x['at'].strftime('%Y-%m-%d %H:%M')} — "
+                                  f"{x.get('n_candidates', 0)} candidates"
+                                  for x in runs].index(pick)]
+                        full = store.get_run(str(r["_id"]))
+                        if full and full.get("candidates"):
+                            st.session_state["cand"] = pd.DataFrame(
+                                full["candidates"])
+                            st.session_state["batch"] = 0
+                            st.success("Loaded. Go to Build sheets.")
+                        else:
+                            st.warning("That run has no candidates stored.")
 
 
 # ---------- Manual ----------
