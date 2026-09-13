@@ -921,40 +921,161 @@ with tab1:
 
     cdf = by_cat.assign(Negative=by_cat["Value"].abs()).copy()
     cdf["Units short"] = cdf["Units"].abs()
-    pickcat = alt.selection_point(fields=["category"], on="click", empty=True)
-    bars = (
-        alt.Chart(cdf)
-        .mark_bar(cornerRadiusEnd=3, height=17)
-        .encode(
-            x=alt.X("Negative:Q", title="Negative value (AED)",
-                    axis=alt.Axis(format=",.0f", grid=True,
-                                  gridColor="#ffffff14")),
+    cdf = cdf.sort_values("Negative", ascending=False).reset_index(drop=True)
+    cdf["Cumulative %"] = (cdf["Negative"].cumsum() / cdf["Negative"].sum()
+                           * 100).round(1)
+
+    kind = st.radio("Chart", ["Linked", "Bars", "Line", "Area", "Pareto",
+                              "Donut"],
+                    horizontal=True, key="cat_chart_kind") or "Linked"
+
+    TIP = [alt.Tooltip("category:N", title="Category"),
+           alt.Tooltip("Lines:Q", title="Lines", format=",.0f"),
+           alt.Tooltip("Negative:Q", title="Value (AED)", format=",.2f"),
+           alt.Tooltip("Units short:Q", title="Units short", format=",.2f"),
+           alt.Tooltip("Share %:Q", title="Share of total", format=".1f"),
+           alt.Tooltip("Avg/line:Q", title="Avg per line", format=",.1f"),
+           alt.Tooltip("Worst line:Q", title="Worst single line", format=",.2f")]
+    GRID = alt.Axis(format=",.0f", grid=True, gridColor="#ffffff12")
+    ORDER = cdf["category"].tolist()
+
+    if kind == "Linked":
+        # category bars on the left drive the item chart on the right
+        items = neg[["bc", "Item Name", "category", "qty", "val"]].copy()
+        items["Negative"] = items["val"].abs()
+        items = (items.sort_values("Negative", ascending=False)
+                 .groupby("category", group_keys=False).head(15))
+        items["Item"] = items["Item Name"].str.slice(0, 42)
+
+        click = alt.selection_point(fields=["category"], value=[
+            {"category": cdf.iloc[0]["category"]}])
+
+        left = (alt.Chart(cdf).mark_bar(cornerRadiusEnd=3)
+                .encode(
+                    x=alt.X("Negative:Q", title="Value (AED)",
+                            axis=alt.Axis(format=",.0f", grid=True,
+                                          gridColor="#ffffff12")),
+                    y=alt.Y("category:N", sort="-x", title=None,
+                            axis=alt.Axis(labelLimit=220, grid=False,
+                                          labelOverlap=False, labelFontSize=11)),
+                    color=alt.condition(click, alt.value("#ff5a5f"),
+                                        alt.value("#3a3f4b")),
+                    tooltip=TIP)
+                .add_params(click)
+                .properties(width=330, height=max(300, 26 * len(cdf)),
+                            title="Click a category"))
+
+        right = (alt.Chart(items).mark_bar(cornerRadiusEnd=3, color="#ff8f94")
+                 .encode(
+                     x=alt.X("Negative:Q", title="Value (AED)",
+                             axis=alt.Axis(format=",.0f", grid=True,
+                                           gridColor="#ffffff12")),
+                     y=alt.Y("Item:N", sort="-x", title=None,
+                             axis=alt.Axis(labelLimit=280, grid=False,
+                                           labelOverlap=False, labelFontSize=11)),
+                     tooltip=[alt.Tooltip("Item Name:N", title="Item"),
+                              alt.Tooltip("bc:N", title="Barcode"),
+                              alt.Tooltip("qty:Q", title="Qty", format=",.2f"),
+                              alt.Tooltip("val:Q", title="Value (AED)",
+                                          format=",.2f")])
+                 .transform_filter(click)
+                 .properties(width=420, height=max(300, 26 * len(cdf)),
+                             title="Biggest items in it"))
+
+        ch = alt.hconcat(left, right).resolve_scale(y="independent")
+
+    elif kind == "Bars":
+        sel = alt.selection_point(fields=["category"], on="click", empty=True)
+        base = alt.Chart(cdf).encode(
+            x=alt.X("Negative:Q", title="Negative value (AED)", axis=GRID),
             y=alt.Y("category:N", title=None, sort="-x",
-                    axis=alt.Axis(labelLimit=200)),
-            color=alt.condition(
-                pickcat,
-                alt.Color("Negative:Q", legend=None,
-                          scale=alt.Scale(scheme="reds", reverse=False)),
-                alt.value("#3a3f4b")),
-            opacity=alt.condition(pickcat, alt.value(0.95), alt.value(0.35)),
-            tooltip=[alt.Tooltip("category:N", title="Category"),
-                     alt.Tooltip("Lines:Q", title="Lines", format=",.0f"),
-                     alt.Tooltip("Negative:Q", title="Value (AED)", format=",.2f"),
-                     alt.Tooltip("Units short:Q", title="Units short", format=",.2f"),
-                     alt.Tooltip("Share %:Q", title="Share of total", format=".1f"),
-                     alt.Tooltip("Avg/line:Q", title="Avg per line", format=",.1f"),
-                     alt.Tooltip("Worst line:Q", title="Worst single line",
-                                 format=",.2f")])
-        .add_params(pickcat)
-    )
-    labels = bars.mark_text(align="left", dx=4, color="#c9cdd4", fontSize=11).encode(
-        text=alt.Text("Negative:Q", format=",.0f"), color=alt.value("#c9cdd4"),
-        opacity=alt.condition(pickcat, alt.value(1), alt.value(0.4)))
-    st.altair_chart((bars + labels).properties(
-        height=max(240, 23 * len(cdf))).configure_view(strokeWidth=0),
-        use_container_width=True)
-    st.caption("Hover a bar for the full breakdown. Click to isolate, "
-               "click the background to reset.")
+                    axis=alt.Axis(labelLimit=220, grid=False,
+                                  labelOverlap=False, labelFontSize=11)))
+        ch = (base.mark_bar(cornerRadiusEnd=3, height=17).encode(
+                  color=alt.condition(sel, alt.Color(
+                      "Negative:Q", legend=None,
+                      scale=alt.Scale(scheme="reds")), alt.value("#3a3f4b")),
+                  opacity=alt.condition(sel, alt.value(.95), alt.value(.35)),
+                  tooltip=TIP).add_params(sel)
+              + base.mark_text(align="left", dx=4, color="#c9cdd4",
+                               fontSize=11).encode(
+                  text=alt.Text("Negative:Q", format=",.0f")))
+        ch = ch.properties(height=max(280, 30 * len(cdf)))
+
+    elif kind in ("Line", "Area"):
+        base = alt.Chart(cdf).encode(
+            x=alt.X("category:N", sort=ORDER, title=None,
+                    axis=alt.Axis(labelAngle=-40, labelLimit=140, grid=False)),
+            y=alt.Y("Negative:Q", title="Negative value (AED)", axis=GRID),
+            tooltip=TIP)
+        if kind == "Line":
+            ch = (base.mark_line(color="#ff6b6b", strokeWidth=2,
+                                 point=alt.OverlayMarkDef(
+                                     color="#ff6b6b", size=60))
+                  + base.mark_point(size=180, opacity=0))
+        else:
+            ch = (base.mark_area(
+                      line={"color": "#ff6b6b", "strokeWidth": 2},
+                      color=alt.Gradient(
+                          gradient="linear",
+                          stops=[alt.GradientStop(color="#ff6b6b00", offset=0),
+                                 alt.GradientStop(color="#ff6b6b99", offset=1)],
+                          x1=1, x2=1, y1=1, y2=0), interpolate="monotone")
+                  + base.mark_point(size=180, opacity=0))
+        ch = ch.properties(height=360)
+
+    elif kind == "Pareto":
+        base = alt.Chart(cdf).encode(
+            x=alt.X("category:N", sort=ORDER, title=None,
+                    axis=alt.Axis(labelAngle=-40, labelLimit=140, grid=False)))
+        bar = base.mark_bar(cornerRadiusEnd=2, color="#ff6b6b", opacity=.75)\
+            .encode(y=alt.Y("Negative:Q", title="Negative value (AED)",
+                            axis=GRID), tooltip=TIP)
+        line = base.mark_line(color="#2eb872", strokeWidth=2,
+                              point=alt.OverlayMarkDef(color="#2eb872"))\
+            .encode(y=alt.Y("Cumulative %:Q", title="Cumulative % of total",
+                            axis=alt.Axis(format=".0f", grid=False)),
+                    tooltip=[alt.Tooltip("category:N", title="Category"),
+                             alt.Tooltip("Cumulative %:Q", format=".1f")])
+        ch = alt.layer(bar, line).resolve_scale(y="independent")\
+            .properties(height=380)
+
+    else:  # Donut
+        top = cdf.head(9).copy()
+        rest = cdf.iloc[9:]
+        if len(rest):
+            top = pd.concat([top, pd.DataFrame([{
+                "category": f"Other ({len(rest)})",
+                "Negative": rest["Negative"].sum(),
+                "Lines": rest["Lines"].sum(),
+                "Units short": rest["Units short"].sum(),
+                "Share %": round(rest["Negative"].sum() /
+                                 cdf["Negative"].sum() * 100, 1),
+                "Avg/line": 0, "Worst line": 0}])], ignore_index=True)
+        ch = (alt.Chart(top).mark_arc(innerRadius=70, cornerRadius=2,
+                                      stroke="#0e1117", strokeWidth=1)
+              .encode(theta=alt.Theta("Negative:Q", stack=True),
+                      color=alt.Color("category:N", title=None,
+                                      scale=alt.Scale(scheme="reds"),
+                                      sort=top["category"].tolist()),
+                      tooltip=[alt.Tooltip("category:N", title="Category"),
+                               alt.Tooltip("Negative:Q", title="Value (AED)",
+                                           format=",.2f"),
+                               alt.Tooltip("Share %:Q", format=".1f")])
+              .properties(height=380))
+
+    st.altair_chart(ch.configure_view(strokeWidth=0), use_container_width=True)
+    st.caption({"Linked": "Click any category on the left — the right panel "
+                          "switches to its biggest items. Hover either side "
+                          "for barcode, quantity and value.",
+                "Bars": "Hover for the full breakdown. Click a bar to isolate it.",
+                "Line": "Categories ordered largest first — the drop-off shows "
+                        "how few sections hold the money.",
+                "Area": "Same ordering, filled to show accumulated weight.",
+                "Pareto": "Bars are value, the green line is the running total. "
+                          "Where it flattens, the rest stops mattering.",
+                "Donut": "Top nine categories, everything else grouped."}
+               .get(kind, ""))
 
     st.dataframe(
         by_cat.rename(columns={"category": "Category"}),
