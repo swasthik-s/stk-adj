@@ -489,16 +489,28 @@ def _n(x):
     return f"{float(x):.7f}".rstrip("0").rstrip(".") or "0"
 
 
-def make_txt(lines, prefix="SML") -> bytes:
+def make_txt(lines, prefix="SML"):
     """One line per stock movement, no header, no quotes:
         PREFIX,BARCODE,COST,QTY
-    Outer side carries the negative qty, single side the positive."""
-    out = []
+    Outer side carries the negative qty, single side the positive.
+
+    Returns (bytes, residual_report). The residual is computed from the
+    numbers as actually written, not the full-precision ones, because that
+    is what iTrade will multiply out."""
+    out, report, net = [], [], 0.0
     for ln in lines:
-        (obc, _, _, oqty, ocost, _), (sbc, _, _, sqty, scost, _) = ln.rows()
-        out.append(f"{prefix},{obc},{_n(ocost)},{_n(oqty)}")
-        out.append(f"{prefix},{sbc},{_n(scost)},{_n(sqty)}")
-    return ("\n".join(out) + "\n").encode("ascii", "ignore")
+        (obc, odesc, _, oqty, ocost, _), (sbc, sdesc, _, sqty, scost, _) = ln.rows()
+        oc, oq = _n(ocost), _n(oqty)
+        sc, sq = _n(scost), _n(sqty)
+        out.append(f"{prefix},{obc},{oc},{oq}")
+        out.append(f"{prefix},{sbc},{sc},{sq}")
+        diff = round(float(oc) * float(oq) + float(sc) * float(sq), 2)
+        net += diff
+        if abs(diff) > 0.004:
+            report.append({"Item": sdesc, "Conv": ln.conv,
+                           "Written cost": sc, "Off by (AED)": diff})
+    return (("\n".join(out) + "\n").encode("ascii", "ignore"),
+            {"net": round(net, 2), "rows": report})
 
 
 def validate(row, master_idx, neg_map, drift_tol=15.0):
@@ -1018,6 +1030,7 @@ def build_tab(adj_date, prepared, checked, verified, txt_prefix):
                      type="primary", use_container_width=True):
             zbuf = io.BytesIO()
             alltxt, work, bad = [], [], 0
+            txt_net, txt_rows = 0.0, []
             with zipfile.ZipFile(zbuf, "w", zipfile.ZIP_DEFLATED) as z:
                 for i in range(0, len(pool), int(per)):
                     rows_ = pool[i:i + int(per)]
@@ -1030,9 +1043,11 @@ def build_tab(adj_date, prepared, checked, verified, txt_prefix):
                     z.writestr(f"ADJ_{k:03d}.xlsx",
                                build_sheet(lns, remarks, adj_date, prepared,
                                            checked, verified, live=live_mode))
-                    t = make_txt(lns, txt_prefix)
+                    t, rep = make_txt(lns, txt_prefix)
                     z.writestr(f"ADJ_{k:03d}.txt", t)
                     alltxt.append(t.decode())
+                    txt_net += rep["net"]
+                    txt_rows += rep["rows"]
                     for ln in lns:
                         a_, b_ = ln.rows()
                         work.append({"FILE": f"ADJ_{k:03d}",
@@ -1057,6 +1072,16 @@ def build_tab(adj_date, prepared, checked, verified, txt_prefix):
             else:
                 st.success(f"{len(pool)} pairs in "
                            f"{math.ceil(len(pool)/int(per))} sheets, all totals 0.00")
+            if txt_rows:
+                st.warning(f"Import files carry a rounding residual of "
+                           f"{txt_net:+.2f} AED across {len(txt_rows)} pairs "
+                           f"(uneven conversions). The Excel sheets are exact.")
+                with st.expander("Which pairs, and by how much"):
+                    st.dataframe(pd.DataFrame(txt_rows).sort_values(
+                        "Off by (AED)", key=abs, ascending=False),
+                        use_container_width=True, hide_index=True)
+            else:
+                st.caption("Import files net to exactly 0.00 as well.")
             st.download_button("⬇ Download everything (zip)", zbuf.getvalue(),
                                f"ADJUSTMENTS_{adj_date.replace('-', '')}.zip",
                                "application/zip", use_container_width=True)
@@ -1101,7 +1126,9 @@ def build_tab(adj_date, prepared, checked, verified, txt_prefix):
                              "DESCRIPTION": b_[1], "UNIT": b_[2],
                              "QTY": b_[3], "COST": b_[4], "VALUE": b_[5]})
             pdf = pd.DataFrame(prev)
-            st.session_state["last_txt"] = make_txt(lines, txt_prefix)
+            _t, _rep = make_txt(lines, txt_prefix)
+            st.session_state["last_txt"] = _t
+            st.session_state["last_txt_rep"] = _rep
             st.session_state["last_sheet"] = (n, data, pdf,
                                               round(pdf["VALUE"].sum(), 2))
             st.session_state["batch"] = max(done, s0 + len(lines))
@@ -1129,8 +1156,16 @@ def build_tab(adj_date, prepared, checked, verified, txt_prefix):
             d2.download_button(f"⬇ ADJ_{n:03d}.txt (iTrade import)", txt,
                                f"ADJ_{n:03d}.txt", "text/plain",
                                use_container_width=True)
+            rep = st.session_state.get("last_txt_rep", {"net": 0, "rows": []})
+            if rep["rows"]:
+                st.warning(f"Import file residual {rep['net']:+.2f} AED on "
+                           f"{len(rep['rows'])} pair(s) — uneven conversion. "
+                           f"The Excel sheet itself is exact.")
             with st.expander("Preview the import file"):
                 st.code(txt.decode(), language="text")
+                if rep["rows"]:
+                    st.dataframe(pd.DataFrame(rep["rows"]),
+                                 use_container_width=True, hide_index=True)
 
 with tab2:
     candidates_tab(neg, master, master_idx, neg_map,
