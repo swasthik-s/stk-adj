@@ -63,43 +63,114 @@ def load_master(raw: bytes) -> pd.DataFrame:
 
 
 @st.cache_data(show_spinner=False)
-def load_negatives(raw: bytes) -> pd.DataFrame:
-    """Handles the category-grouped export with the header a few rows down."""
-    for hdr in range(4, 14):
-        try:
-            t = pd.read_excel(io.BytesIO(raw), header=hdr, dtype=str)
-        except Exception:
-            continue
-        if {"ItemCode", "Item Name", "Quantity"} <= set(t.columns):
-            raw_df = t.dropna(axis=1, how="all")
-            break
-    else:
-        raise ValueError("Could not find the ItemCode / Item Name / Quantity header row")
+def inspect_negatives(raw: bytes):
+    """Return every sheet name and a preview grid, so the header row can be
+    found automatically or picked by hand."""
+    xls = pd.ExcelFile(io.BytesIO(raw))
+    return xls.sheet_names
 
-    for c, n in (("Quantity", "qty"), ("Stock Value", "val"),
-                 ("Selling Price", "sp"), ("Cost", "cost")):
-        raw_df[n] = (
-            pd.to_numeric(raw_df[c].astype(str).str.replace(",", "", regex=False),
-                          errors="coerce")
-            if c in raw_df.columns else float("nan")
-        )
+
+CODE_KEYS = ["itemcode", "item code", "barcode", "code", "single barcode",
+             "itembarcode", "item barcode", "sku"]
+NAME_KEYS = ["item name", "itemname", "description", "item description",
+             "particulars", "product", "name"]
+QTY_KEYS = ["quantity", "qty", "stock qty", "stockqty", "balance qty",
+            "closing qty", "stock", "balance"]
+VAL_KEYS = ["stock value", "value", "stockvalue", "amount", "net value",
+            "total value"]
+SP_KEYS = ["selling price", "sellingprice", "sale price", "mrp", "retail",
+           "price"]
+CST_KEYS = ["cost", "cost price", "costprice", "unit cost", "avg cost"]
+
+
+def _norm(x):
+    return re.sub(r"[^a-z0-9 ]", "", str(x).strip().lower())
+
+
+def _match(cols, keys):
+    n = [_norm(c) for c in cols]
+    for k in keys:                       # exact first
+        if k in n:
+            return cols[n.index(k)]
+    for k in keys:                       # then contains
+        for i, c in enumerate(n):
+            if k in c:
+                return cols[i]
+    return None
+
+
+@st.cache_data(show_spinner=False)
+def detect_header(raw: bytes, sheet):
+    """Scan the first 40 rows for the row that looks like a header."""
+    grid = pd.read_excel(io.BytesIO(raw), sheet_name=sheet, header=None,
+                         dtype=str, nrows=40)
+    best, best_score = None, 0
+    for i in range(len(grid)):
+        cells = [c for c in grid.iloc[i].tolist() if str(c) != "nan"]
+        if len(cells) < 3:
+            continue
+        score = sum(bool(_match(cells, k)) for k in (CODE_KEYS, NAME_KEYS, QTY_KEYS))
+        if score > best_score:
+            best, best_score = i, score
+    return best, best_score, grid
+
+
+@st.cache_data(show_spinner=False)
+def load_negatives(raw: bytes, sheet=0, header_row=None, mapping=None) -> pd.DataFrame:
+    if header_row is None:
+        header_row, score, _ = detect_header(raw, sheet)
+        if header_row is None or score < 3:
+            raise ValueError("HEADER_NOT_FOUND")
+    t = pd.read_excel(io.BytesIO(raw), sheet_name=sheet, header=header_row,
+                      dtype=str).dropna(axis=1, how="all")
+    cols = list(t.columns)
+    mapping = mapping or {}
+    c_code = mapping.get("code") or _match(cols, CODE_KEYS)
+    c_name = mapping.get("name") or _match(cols, NAME_KEYS)
+    c_qty = mapping.get("qty") or _match(cols, QTY_KEYS)
+    if not (c_code and c_name and c_qty):
+        raise ValueError(f"MISSING_COLUMNS:{cols}")
+    c_val = mapping.get("val") or _match(cols, VAL_KEYS)
+    c_sp = mapping.get("sp") or _match(cols, SP_KEYS)
+    c_cost = mapping.get("cost") or _match(cols, CST_KEYS)
+
+    def num(col):
+        if col and col in t.columns:
+            return pd.to_numeric(
+                t[col].astype(str).str.replace(",", "", regex=False)
+                .str.replace("\u2212", "-", regex=False), errors="coerce")
+        return pd.Series([float("nan")] * len(t), index=t.index)
+
+    t["qty"] = num(c_qty)
+    t["val"] = num(c_val)
+    t["sp"] = num(c_sp)
+    t["cost"] = num(c_cost)
+    if t["val"].isna().all():
+        t["val"] = t["qty"] * t["cost"]
 
     grp = cat = None
     rows = []
-    for r in raw_df.to_dict("records"):
-        code = str(r.get("ItemCode", "")).strip()
-        name = str(r.get("Item Name", "")).strip()
-        if name in ("", "nan"):
+    for r in t.to_dict("records"):
+        code = str(r.get(c_code, "")).strip()
+        name = str(r.get(c_name, "")).strip()
+        if name in ("", "nan", "None"):
             if code in ("Stock", "Non Stock"):
                 grp = code
-            elif code not in ("", "nan"):
+            elif code not in ("", "nan", "None"):
                 cat = code
             continue
-        r["group"], r["category"] = grp, cat
+        r["group"], r["category"] = grp, (cat or "UNCATEGORISED")
+        r["Item Name"] = name
+        r["bc"] = code
         rows.append(r)
     d = pd.DataFrame(rows)
-    d["bc"] = d["ItemCode"].astype(str).str.strip()
-    return d[d["qty"] < 0].reset_index(drop=True)
+    if d.empty:
+        raise ValueError("NO_ROWS")
+    d = d[d["qty"] < 0].reset_index(drop=True)
+    if d.empty:
+        raise ValueError("NO_NEGATIVES")
+    d["val"] = d["val"].fillna(0)
+    return d
 
 
 # ==================== matching ====================
@@ -350,10 +421,66 @@ if not (f_master and f_neg):
 
 try:
     master = load_master(f_master.getvalue())
-    neg = load_negatives(f_neg.getvalue())
 except Exception as e:
-    st.error(f"Could not read the files: {e}")
+    st.error(f"Could not read the masterlist: {e}")
     st.stop()
+
+raw_neg = f_neg.getvalue()
+sheets = inspect_negatives(raw_neg)
+sheet = sheets[0] if len(sheets) == 1 else st.selectbox(
+    "Which sheet holds the negative stock?", sheets)
+auto_row, auto_score, grid = detect_header(raw_neg, sheet)
+
+neg = None
+try:
+    neg = load_negatives(raw_neg, sheet)
+except Exception as err:
+    st.warning("I could not read this export automatically — map the columns below.")
+    with st.expander("First 15 rows of the file", expanded=True):
+        st.dataframe(grid.head(15), use_container_width=True)
+    hr = st.number_input(
+        "Which row holds the column headings? (row 1 is the first row)",
+        min_value=1, max_value=40,
+        value=int(auto_row) + 1 if auto_row is not None else 1)
+    try:
+        cols = list(pd.read_excel(io.BytesIO(raw_neg), sheet_name=sheet,
+                                  header=int(hr) - 1, dtype=str, nrows=5)
+                    .dropna(axis=1, how="all").columns)
+    except Exception:
+        cols = []
+    if cols:
+        none = "— none —"
+        c1, c2, c3 = st.columns(3)
+        m_code = c1.selectbox("Barcode / item code", cols,
+                              index=cols.index(_match(cols, CODE_KEYS))
+                              if _match(cols, CODE_KEYS) else 0)
+        m_name = c2.selectbox("Description", cols,
+                              index=cols.index(_match(cols, NAME_KEYS))
+                              if _match(cols, NAME_KEYS) else 0)
+        m_qty = c3.selectbox("Quantity", cols,
+                             index=cols.index(_match(cols, QTY_KEYS))
+                             if _match(cols, QTY_KEYS) else 0)
+        c4, c5, c6 = st.columns(3)
+        opt = [none] + cols
+        def pick(col, label, keys):
+            g = _match(cols, keys)
+            return col.selectbox(label, opt, index=opt.index(g) if g else 0)
+        m_val = pick(c4, "Stock value (optional)", VAL_KEYS)
+        m_cost = pick(c5, "Cost (optional)", CST_KEYS)
+        m_sp = pick(c6, "Selling price (optional)", SP_KEYS)
+        if st.button("Load with this mapping", type="primary"):
+            try:
+                neg = load_negatives(raw_neg, sheet, int(hr) - 1, {
+                    "code": m_code, "name": m_name, "qty": m_qty,
+                    "val": None if m_val == none else m_val,
+                    "cost": None if m_cost == none else m_cost,
+                    "sp": None if m_sp == none else m_sp,
+                })
+                st.session_state["neg_map_ok"] = True
+            except Exception as e2:
+                st.error(f"Still could not read it: {e2}")
+    if neg is None:
+        st.stop()
 
 master_idx = master.set_index("Item Barcode").to_dict("index")
 neg_map = dict(zip(neg["bc"], neg["qty"]))
