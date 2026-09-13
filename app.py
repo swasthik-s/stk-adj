@@ -1600,6 +1600,7 @@ def build_tab(adj_date, prepared, checked, verified, txt_prefix, store):
                               help="11 pairs = 22 rows. Pair 12 starts a new sheet.")
         st.caption(f"{len(pool)} pairs → {math.ceil(len(pool)/int(per))} sheets")
 
+        st.markdown("#### All sheets at once")
         if st.button(f"Generate all {math.ceil(len(pool)/int(per))} sheets",
                      type="primary", use_container_width=True):
             chunks, work, bad = [], [], 0
@@ -1638,6 +1639,9 @@ def build_tab(adj_date, prepared, checked, verified, txt_prefix, store):
             st.session_state["bulk"] = {
                 "xlsx": build_workbook(chunks, remarks, adj_date, prepared,
                                        checked, verified, live=live_mode),
+                "txts": [(f"ADJ_{i:03d}.txt",
+                          make_txt(c, txt_prefix)[0])
+                         for i, c in enumerate(chunks, start=1)],
                 "txt": "".join(alltxt).encode("ascii", "ignore"),
                 "working": wbuf.getvalue(),
                 "sheets": len(chunks), "pairs": len(pool),
@@ -1660,23 +1664,32 @@ def build_tab(adj_date, prepared, checked, verified, txt_prefix, store):
                                  use_container_width=True, hide_index=True)
 
             stamp = adj_date.replace("-", "")
-            g1, g2, g3 = st.columns(3)
+            XL = ("application/vnd.openxmlformats-officedocument."
+                  "spreadsheetml.sheet")
+
+            g1, g2 = st.columns(2)
             g1.download_button(
-                f"⬇ All {bulk['sheets']} sheets — one Excel",
-                bulk["xlsx"], f"ADJUSTMENTS_{stamp}.xlsx",
-                "application/vnd.openxmlformats-officedocument."
-                "spreadsheetml.sheet", use_container_width=True)
+                f"⬇ Excel — {bulk['sheets']} sheets in one file",
+                bulk["xlsx"], f"ADJUSTMENTS_{stamp}.xlsx", XL,
+                use_container_width=True, type="primary")
             g2.download_button(
-                "⬇ All lines — one txt", bulk["txt"],
+                "⬇ Txt — every line in one file", bulk["txt"],
                 f"ADJUSTMENTS_{stamp}.txt", "text/plain",
                 use_container_width=True)
-            g3.download_button(
-                "⬇ Working file", bulk["working"],
-                f"WORKING_{stamp}.xlsx",
-                "application/vnd.openxmlformats-officedocument."
-                "spreadsheetml.sheet", use_container_width=True)
 
-            with st.expander("Preview the combined import file"):
+            st.caption(f"Or one txt per sheet, named to match the tabs "
+                       f"in the workbook:")
+            tcols = st.columns(min(4, len(bulk["txts"])) or 1)
+            for i, (name, data_) in enumerate(bulk["txts"]):
+                tcols[i % len(tcols)].download_button(
+                    f"⬇ {name}", data_, name, "text/plain",
+                    key=f"bulktxt_{name}", use_container_width=True)
+
+            with st.expander("Working file and previews"):
+                st.download_button(
+                    "⬇ Working file (reconciliation)", bulk["working"],
+                    f"WORKING_{stamp}.xlsx", XL, use_container_width=True)
+                st.caption("Combined import file:")
                 st.code(bulk["txt"].decode(), language=None)
 
             if store and st.button("💾 Save this batch to the database",
@@ -1694,7 +1707,8 @@ def build_tab(adj_date, prepared, checked, verified, txt_prefix, store):
                     "Saved." if ok else f"Not saved: {res}")
 
         st.divider()
-        st.caption("Or build one sheet at a time to print and hand over:")
+        st.markdown("#### One sheet at a time")
+        st.caption("For printing and handing to a section.")
         r1, r2, r3 = st.columns([1, 1, 2])
         start_at = r1.number_input("Start at serial", min_value=1,
                                    max_value=max(len(pool), 1),
@@ -1761,14 +1775,15 @@ def build_tab(adj_date, prepared, checked, verified, txt_prefix, store):
                     [str(x).strip() for x in pdf["OUTER BARCODE"] if str(x).strip()]
                     + [str(x).strip() for x in pdf["SINGLE BARCODE"]
                        if str(x).strip()]), language=None)
-            d1, d2 = st.columns(2)
-            d1.download_button(f"⬇ ADJ_{n:03d}.xlsx", data, f"ADJ_{n:03d}.xlsx",
-                               "application/vnd.openxmlformats-officedocument."
-                               "spreadsheetml.sheet", use_container_width=True)
             txt = st.session_state.get("last_txt", b"")
-            d2.download_button(f"⬇ ADJ_{n:03d}.txt (iTrade import)", txt,
-                               f"ADJ_{n:03d}.txt", "text/plain",
-                               use_container_width=True)
+            d1, d2 = st.columns(2)
+            d1.download_button(
+                f"⬇ Excel — ADJ_{n:03d}.xlsx", data, f"ADJ_{n:03d}.xlsx",
+                "application/vnd.openxmlformats-officedocument."
+                "spreadsheetml.sheet", use_container_width=True, type="primary")
+            d2.download_button(
+                f"⬇ Txt — ADJ_{n:03d}.txt", txt, f"ADJ_{n:03d}.txt",
+                "text/plain", use_container_width=True)
             rep = st.session_state.get("last_txt_rep", {"net": 0, "rows": []})
             if rep["rows"]:
                 st.warning(f"Import file residual {rep['net']:+.2f} AED on "
