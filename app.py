@@ -10,6 +10,7 @@ import zipfile
 from collections import defaultdict
 from dataclasses import dataclass
 
+import altair as alt
 import pandas as pd
 import streamlit as st
 
@@ -918,9 +919,42 @@ with tab1:
     by_cat["Worst line"] = [
         neg.loc[neg["category"] == c, "val"].min() for c in by_cat["category"]]
 
-    st.bar_chart(by_cat.assign(v=by_cat["Value"].abs())
-                 .set_index("category")["v"].rename("Negative value (AED)"),
-                 horizontal=True, height=max(260, 24 * len(by_cat)))
+    cdf = by_cat.assign(Negative=by_cat["Value"].abs()).copy()
+    cdf["Units short"] = cdf["Units"].abs()
+    pickcat = alt.selection_point(fields=["category"], on="click", empty=True)
+    bars = (
+        alt.Chart(cdf)
+        .mark_bar(cornerRadiusEnd=3, height=17)
+        .encode(
+            x=alt.X("Negative:Q", title="Negative value (AED)",
+                    axis=alt.Axis(format=",.0f", grid=True,
+                                  gridColor="#ffffff14")),
+            y=alt.Y("category:N", title=None, sort="-x",
+                    axis=alt.Axis(labelLimit=200)),
+            color=alt.condition(
+                pickcat,
+                alt.Color("Negative:Q", legend=None,
+                          scale=alt.Scale(scheme="reds", reverse=False)),
+                alt.value("#3a3f4b")),
+            opacity=alt.condition(pickcat, alt.value(0.95), alt.value(0.35)),
+            tooltip=[alt.Tooltip("category:N", title="Category"),
+                     alt.Tooltip("Lines:Q", title="Lines", format=",.0f"),
+                     alt.Tooltip("Negative:Q", title="Value (AED)", format=",.2f"),
+                     alt.Tooltip("Units short:Q", title="Units short", format=",.2f"),
+                     alt.Tooltip("Share %:Q", title="Share of total", format=".1f"),
+                     alt.Tooltip("Avg/line:Q", title="Avg per line", format=",.1f"),
+                     alt.Tooltip("Worst line:Q", title="Worst single line",
+                                 format=",.2f")])
+        .add_params(pickcat)
+    )
+    labels = bars.mark_text(align="left", dx=4, color="#c9cdd4", fontSize=11).encode(
+        text=alt.Text("Negative:Q", format=",.0f"), color=alt.value("#c9cdd4"),
+        opacity=alt.condition(pickcat, alt.value(1), alt.value(0.4)))
+    st.altair_chart((bars + labels).properties(
+        height=max(240, 23 * len(cdf))).configure_view(strokeWidth=0),
+        use_container_width=True)
+    st.caption("Hover a bar for the full breakdown. Click to isolate, "
+               "click the background to reset.")
 
     st.dataframe(
         by_cat.rename(columns={"category": "Category"}),
@@ -935,6 +969,34 @@ with tab1:
             "Worst line": st.column_config.NumberColumn(format="AED %.0f"),
         })
 
+    with st.expander("Lines against value — where effort pays off"):
+        sc = by_cat.assign(Negative=by_cat["Value"].abs(),
+                           AvgLine=by_cat["Avg/line"].abs())
+        pts = (alt.Chart(sc).mark_circle(opacity=.8)
+               .encode(
+                   x=alt.X("Lines:Q", title="Number of lines",
+                           scale=alt.Scale(type="symlog")),
+                   y=alt.Y("Negative:Q", title="Negative value (AED)",
+                           scale=alt.Scale(type="symlog")),
+                   size=alt.Size("AvgLine:Q", title="Avg per line",
+                                 scale=alt.Scale(range=[60, 900])),
+                   color=alt.Color("Negative:Q", legend=None,
+                                   scale=alt.Scale(scheme="reds")),
+                   tooltip=[alt.Tooltip("category:N", title="Category"),
+                            alt.Tooltip("Lines:Q", format=",.0f"),
+                            alt.Tooltip("Negative:Q", title="Value (AED)",
+                                        format=",.2f"),
+                            alt.Tooltip("AvgLine:Q", title="Avg per line",
+                                        format=",.1f")])
+               .interactive())
+        txt = pts.mark_text(align="left", dx=9, fontSize=10,
+                            color="#c9cdd4").encode(text="category:N")
+        st.altair_chart((pts + txt).properties(height=420)
+                        .configure_view(strokeWidth=0), use_container_width=True)
+        st.caption("Top left is a few lines holding a lot of money — worth doing "
+                   "by hand. Bottom right is many small lines — bulk adjust. "
+                   "Scroll to zoom, drag to pan.")
+
     # ---------- shape of the problem ----------
     st.subheader("Shape of the problem")
     bands = [(0, 10, "under 10"), (10, 50, "10 to 50"), (50, 200, "50 to 200"),
@@ -947,11 +1009,33 @@ with tab1:
                      "Value": round(float(neg.loc[m, "val"].sum()), 2),
                      "% of value": round(
                          float(neg.loc[m, "val"].sum()) / total * 100, 1)})
-    st.dataframe(pd.DataFrame(rows), use_container_width=True, hide_index=True,
-                 column_config={
-                     "Value": st.column_config.NumberColumn(format="AED %.0f"),
-                     "% of value": st.column_config.ProgressColumn(
-                         format="%.1f%%", min_value=0.0, max_value=100.0)})
+    bands_df = pd.DataFrame(rows)
+    bands_df["Negative"] = bands_df["Value"].abs()
+    bc1, bc2 = st.columns([3, 2])
+    with bc1:
+        st.altair_chart(
+            alt.Chart(bands_df).mark_bar(cornerRadiusEnd=3)
+            .encode(
+                x=alt.X("Value band (AED):N", sort=None, title=None,
+                        axis=alt.Axis(labelAngle=0)),
+                y=alt.Y("Negative:Q", title="Value (AED)",
+                        axis=alt.Axis(format=",.0f")),
+                color=alt.Color("Negative:Q", legend=None,
+                                scale=alt.Scale(scheme="reds")),
+                tooltip=[alt.Tooltip("Value band (AED):N", title="Band"),
+                         alt.Tooltip("Lines:Q", format=",.0f"),
+                         alt.Tooltip("Negative:Q", title="Value (AED)",
+                                     format=",.2f"),
+                         alt.Tooltip("% of value:Q", format=".1f")])
+            .properties(height=260).configure_view(strokeWidth=0),
+            use_container_width=True)
+    with bc2:
+        st.dataframe(bands_df.drop(columns="Negative"),
+                     use_container_width=True, hide_index=True,
+                     column_config={
+                         "Value": st.column_config.NumberColumn(format="AED %.0f"),
+                         "% of value": st.column_config.ProgressColumn(
+                             format="%.1f%%", min_value=0.0, max_value=100.0)})
 
     # ---------- data quality ----------
     st.subheader("Data quality")
