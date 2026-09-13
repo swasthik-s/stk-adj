@@ -13,10 +13,12 @@ from dataclasses import dataclass
 import pandas as pd
 import streamlit as st
 
+MONGO_IMPORT_ERR = None
 try:
     from mongo_store import MongoStore
-except Exception:
+except Exception as _e:
     MongoStore = None
+    MONGO_IMPORT_ERR = f"{type(_e).__name__}: {_e}"
 from openpyxl import Workbook
 from openpyxl.styles import Alignment, Border, Font, PatternFill, Side
 from openpyxl.utils import get_column_letter
@@ -638,23 +640,44 @@ def read_verification(raw: bytes) -> pd.DataFrame:
     return v.sort_values("ROW")
 
 
-@st.cache_resource(show_spinner=False)
-def get_store():
-    """One MongoDB connection for the whole session, or None if not set up."""
+def store_diagnosis():
+    """Returns (store_or_None, reason). The reason says which step failed."""
     if MongoStore is None:
-        return None
+        return None, ("`mongo_store.py` could not be imported. Either the file "
+                      "is missing from the repo, or pymongo is not installed. "
+                      f"Error: {MONGO_IMPORT_ERR}")
     try:
         cfg = st.secrets["mongo"]
     except Exception:
-        return None
-    if not cfg.get("uri"):
-        return None
+        try:
+            keys = list(st.secrets.keys())
+        except Exception:
+            keys = []
+        return None, ("No `[mongo]` section found in secrets. "
+                      + (f"Sections present: {keys}. " if keys else
+                         "No secrets are set at all. ")
+                      + "On Streamlit Cloud: app menu -> Settings -> Secrets, "
+                        "paste the block, press Save, then wait for the restart.")
+    uri = cfg.get("uri", "")
+    if not uri:
+        return None, "The `[mongo]` section has no `uri` key."
+    if not uri.startswith(("mongodb://", "mongodb+srv://")):
+        return None, "The `uri` does not start with mongodb:// or mongodb+srv://"
     try:
-        s = MongoStore(cfg["uri"], cfg.get("db", "stockadj"))
+        s = MongoStore(uri, cfg.get("db", "stockadj"))
         s.ensure_indexes()
-        return s
-    except Exception:
-        return None
+        return s, "ok"
+    except Exception as e:
+        msg = f"{type(e).__name__}: {e}"
+        if "dns" in msg.lower() or "srv" in msg.lower():
+            msg += ("  —  a mongodb+srv:// URI needs dnspython. "
+                    "Put `pymongo[srv]>=4.6` in requirements.txt.")
+        return None, msg
+
+
+@st.cache_resource(show_spinner=False)
+def get_store():
+    return store_diagnosis()[0]
 
 
 # ==================== UI ====================
@@ -1237,8 +1260,10 @@ with tab3:
 
 with tabA:
     if store is None:
-        st.info("No database configured. Every run and every generated sheet "
-                "can be kept if you add this to your secrets:")
+        _, why = store_diagnosis()
+        st.error(f"**Database not connected.**  {why}")
+        st.info("Every run and every generated sheet can be kept once this "
+                "is set up. The secrets block should look like:")
         st.code('[mongo]\nuri = "mongodb+srv://user:password@cluster0.xxxxx.'
                 'mongodb.net/?retryWrites=true&w=majority"\ndb  = "stockadj"',
                 language="toml")
