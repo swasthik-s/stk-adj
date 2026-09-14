@@ -14,7 +14,9 @@ import pandas as pd
 import streamlit as st
 
 MONGO_IMPORT_ERR = None
+mongo_store_mod = None
 try:
+    import mongo_store as mongo_store_mod
     from mongo_store import MongoStore
 except Exception as _e:
     MongoStore = None
@@ -890,31 +892,44 @@ neg_map = dict(zip(neg["bc"], neg["qty"]))
 
 store = get_store()
 if store is not None and neg is not None:
-    import hashlib
-    sig = hashlib.md5(
-        (str(len(neg)) + str(round(float(neg["val"].sum()), 2))
-         + f_neg.name + str(f_neg.size if hasattr(f_neg, "size") else "")
-         ).encode()).hexdigest()
-    if st.session_state.get("snap_sig") != sig:
-        by = (neg.groupby("category", dropna=False)
-              .agg(lines=("val", "size"), qty=("qty", "sum"),
-                   value=("val", "sum")).reset_index())
-        okS, sid = store.save_snapshot(
-            totals={"lines": int(len(neg)),
-                    "value": round(float(neg["val"].sum()), 2),
-                    "units": round(float(neg["qty"].sum()), 3),
-                    "categories": int(neg["category"].nunique()),
-                    "not_in_master": int((~neg["bc"].isin(
-                        set(master["Item Barcode"]))).sum())},
-            by_category=[{"category": r["category"], "lines": int(r["lines"]),
-                          "qty": round(float(r["qty"]), 3),
-                          "value": round(float(r["value"]), 2)}
-                         for r in by.to_dict("records")],
-            source={"negative_file": getattr(f_neg, "name", ""),
-                    "master_file": getattr(f_master, "name", "")})
-        st.session_state["snap_sig"] = sig
-        if okS:
-            st.session_state["snapshot_id"] = sid
+    # Optional. Never let the snapshot break the page — an older mongo_store.py
+    # on the server will not have save_snapshot, and that must not be fatal.
+    _snap = getattr(store, "save_snapshot", None)
+    if _snap is None:
+        st.session_state["snap_warn"] = (
+            "History snapshots need the newer mongo_store.py. "
+            "Push the updated file and redeploy — everything else works.")
+    else:
+        try:
+            import hashlib
+            sig = hashlib.md5(
+                (str(len(neg)) + str(round(float(neg["val"].sum()), 2))
+                 + str(getattr(f_neg, "name", ""))).encode()).hexdigest()
+            if st.session_state.get("snap_sig") != sig:
+                by = (neg.groupby("category", dropna=False)
+                      .agg(lines=("val", "size"), qty=("qty", "sum"),
+                           value=("val", "sum")).reset_index())
+                okS, sid = _snap(
+                    totals={"lines": int(len(neg)),
+                            "value": round(float(neg["val"].sum()), 2),
+                            "units": round(float(neg["qty"].sum()), 3),
+                            "categories": int(neg["category"].nunique()),
+                            "not_in_master": int((~neg["bc"].isin(
+                                set(master["Item Barcode"]))).sum())},
+                    by_category=[{"category": r["category"],
+                                  "lines": int(r["lines"]),
+                                  "qty": round(float(r["qty"]), 3),
+                                  "value": round(float(r["value"]), 2)}
+                                 for r in by.to_dict("records")],
+                    source={"negative_file": getattr(f_neg, "name", ""),
+                            "master_file": getattr(f_master, "name", "")})
+                st.session_state["snap_sig"] = sig
+                if okS:
+                    st.session_state["snapshot_id"] = sid
+        except Exception as e:
+            st.session_state["snap_warn"] = (
+                f"Snapshot not saved ({type(e).__name__}). "
+                f"Everything else is unaffected.")
 
 tab1, tab2, tabV, tab3, tab4, tabA = st.tabs(
     ["Overview", "Candidates", "Verify", "Build sheets", "Manual pair", "Archive"]
@@ -1829,14 +1844,25 @@ with tabA:
                    "makes the password the only barrier, so use a long one and "
                    "give the user access to this database only.")
     else:
+        if st.session_state.get("snap_warn"):
+            st.warning(st.session_state["snap_warn"])
         ok, msg = store.check()
         (st.success if ok else st.error)(msg)
+        if getattr(mongo_store_mod, "STORE_VERSION", 1) < 2:
+            st.warning("mongo_store.py is out of date — push the current one.")
         if ok:
             sub0, sub1, sub2 = st.tabs(["History by date", "Saved batches",
                                         "Run history"])
 
             with sub0:
-                snaps = store.list_snapshots()
+                if not hasattr(store, "list_snapshots"):
+                    st.warning("`mongo_store.py` in this deployment is older "
+                               "than `app.py`. Push the current mongo_store.py "
+                               "to the repo and the history will start "
+                               "recording.")
+                    snaps = []
+                else:
+                    snaps = store.list_snapshots()
                 if not snaps:
                     st.caption("No snapshots yet. One is saved automatically "
                                "each time you upload a negative stock file.")
@@ -1898,7 +1924,8 @@ with tabA:
                     pickd = st.selectbox("Open a snapshot",
                                          hist["When"].tolist()[::-1])
                     row = hist[hist["When"] == pickd].iloc[0]
-                    full = store.get_snapshot(row["_id"])
+                    full = (store.get_snapshot(row["_id"])
+                            if hasattr(store, "get_snapshot") else None)
                     if full and full.get("by_category"):
                         bysnap = pd.DataFrame(full["by_category"])
                         bysnap = bysnap.sort_values("value")
