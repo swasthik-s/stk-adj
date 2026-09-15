@@ -218,8 +218,12 @@ def detect_header(raw: bytes, sheet):
         cells = [c for c in grid.iloc[i].tolist() if str(c) != "nan"]
         if len(cells) < 3:
             continue
-        score = sum(bool(_match(cells, k)) for k in (CODE_KEYS, NAME_KEYS, QTY_KEYS))
-        if score > best_score:
+        # code + qty is the minimum. Name is a bonus — it can be joined in
+        # from the masterlist by barcode when the export leaves it out.
+        essential = (bool(_match(cells, CODE_KEYS))
+                     + bool(_match(cells, QTY_KEYS)))
+        score = essential * 2 + bool(_match(cells, NAME_KEYS))
+        if essential == 2 and score > best_score:
             best, best_score = i, score
     return best, best_score, grid
 
@@ -228,16 +232,16 @@ def detect_header(raw: bytes, sheet):
 def load_negatives(raw: bytes, sheet=0, header_row=None, mapping=None) -> pd.DataFrame:
     if header_row is None:
         header_row, score, _ = detect_header(raw, sheet)
-        if header_row is None or score < 3:
+        if header_row is None or score < 4:      # 4 = code + qty both found
             raise ValueError("HEADER_NOT_FOUND")
     t = pd.read_excel(io.BytesIO(raw), sheet_name=sheet, header=header_row,
                       dtype=str).dropna(axis=1, how="all")
     cols = list(t.columns)
     mapping = mapping or {}
     c_code = mapping.get("code") or _match(cols, CODE_KEYS)
-    c_name = mapping.get("name") or _match(cols, NAME_KEYS)
+    c_name = mapping.get("name") or _match(cols, NAME_KEYS)   # may be absent
     c_qty = mapping.get("qty") or _match(cols, QTY_KEYS)
-    if not (c_code and c_name and c_qty):
+    if not (c_code and c_qty):
         raise ValueError(f"MISSING_COLUMNS:{cols}")
     c_val = mapping.get("val") or _match(cols, VAL_KEYS)
     c_sp = mapping.get("sp") or _match(cols, SP_KEYS)
@@ -261,13 +265,26 @@ def load_negatives(raw: bytes, sheet=0, header_row=None, mapping=None) -> pd.Dat
     rows = []
     for r in t.to_dict("records"):
         code = str(r.get(c_code, "")).strip()
-        name = str(r.get(c_name, "")).strip()
-        if name in ("", "nan", "None"):
+        name = (str(r.get(c_name, "")).strip() if c_name else "")
+        if name in ("nan", "None"):
+            name = ""
+        if code in ("", "nan", "None"):
+            continue
+
+        if c_name:
+            is_item = name != ""
+        else:
+            # no description column — a category band is a non-numeric code
+            is_item = bool(re.fullmatch(r"[A-Za-z0-9\-_/]*\d[A-Za-z0-9\-_/]*",
+                                        code))
+
+        if not is_item:
             if code in ("Stock", "Non Stock"):
                 grp = code
-            elif code not in ("", "nan", "None"):
+            else:
                 cat = code
             continue
+
         r["group"] = grp or "STOCK"
         r["category"] = cat or "UNCATEGORISED"
         r["Item Name"] = name
@@ -389,7 +406,8 @@ def find_breaks(m: pd.DataFrame, d: pd.DataFrame, threshold: float,
 def find_swaps(m: pd.DataFrame, d: pd.DataFrame, lo: float, hi: float,
                price_tol: float) -> pd.DataFrame:
     mm = m.copy()
-    mm["isml"] = mm["Item Name"].astype(str).str.upper().str.contains(MULT.pattern, regex=True, na=False)
+    mm["isml"] = mm["Item Name"].astype(str).str.upper().map(
+        lambda x: bool(MULT.search(x)))
     own_cost = dict(zip(mm["Item Barcode"], mm["cost"]))
     pos = mm[(mm["stock"] > 0) & (~mm["isml"])]
     P, inv = [], defaultdict(list)
@@ -440,7 +458,7 @@ def find_swaps(m: pd.DataFrame, d: pd.DataFrame, lo: float, hi: float,
                           own_cost[r["bc"]] * 100, 1)
                     if own_cost.get(r["bc"]) else None),
             ))
-    return pd.DataFrame(out), pd.DataFrame(combos)
+    return pd.DataFrame(out)
 
 
 # ==================== sheet writer ====================
@@ -891,6 +909,22 @@ master_idx = master.set_index("Item Barcode").to_dict("index")
 neg_map = dict(zip(neg["bc"], neg["qty"]))
 
 store = get_store()
+# A negative export without a description column is fine — join the names in
+if neg is not None and master is not None:
+    if "Item Name" not in neg.columns:
+        neg["Item Name"] = ""
+    blank = neg["Item Name"].astype(str).str.strip().eq("")
+    if blank.any():
+        lookup = dict(zip(master["Item Barcode"].astype(str).str.strip(),
+                          master["Item Name"].astype(str)))
+        neg.loc[blank, "Item Name"] = (neg.loc[blank, "bc"].map(lookup)
+                                       .fillna(""))
+        still = neg["Item Name"].astype(str).str.strip().eq("")
+        neg.loc[still, "Item Name"] = "(not in masterlist) " + neg.loc[still, "bc"]
+        st.caption(f"{int(blank.sum())} rows had no description in the export — "
+                   f"{int(blank.sum() - still.sum())} filled in from the "
+                   f"masterlist by barcode.")
+
 if store is not None and neg is not None:
     # Optional. Never let the snapshot break the page — an older mongo_store.py
     # on the server will not have save_snapshot, and that must not be fatal.
