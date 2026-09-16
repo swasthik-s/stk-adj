@@ -815,26 +815,46 @@ def get_store():
 
 
 # ==================== page navigation ====================
-def nav_links(where=None):
-    """Buttons to the other tools. Skips any page that is not deployed,
-    so a missing file never breaks this page."""
+def safe_link(target, path, label, help_=None):
+    """st.page_link resolves paths differently depending on how the app was
+    started, so never let a bad path take the page down. Try the likely
+    spellings, then fall back to plain text."""
     from pathlib import Path
-    target = where or st
-    here = Path(__file__).parent / "pages"
-    known = [("pdftoexcel.py", "📄 PDF to Excel / txt",
-              "Pull tables and text out of any PDF"),
-             ("invoice2itrade.py", "🧾 Supplier invoice → iTrade",
-              "Parse an invoice into a clean import file")]
-    live = [(f, label, help_) for f, label, help_ in known
-            if (here / f).exists()]
-    if not live:
-        return
-    for f, label, help_ in live:
+    root = Path(__file__).parent
+    tries = [path]
+    if "/" in path:
+        tries.append(path.split("/")[-1])
+    else:
+        tries.append(str(root / path))
+    tries.append(str((root / path).resolve()))
+    for t in dict.fromkeys(tries):
         try:
-            target.page_link(f"pages/{f}", label=label, help=help_,
+            target.page_link(t, label=label, help=help_,
                              use_container_width=True)
+            return True
         except Exception:
-            target.caption(f"{label} — open it from the sidebar")
+            continue
+    return False
+
+
+def nav_links(target=None, include_self=True):
+    """Buttons to the other tools. Any page that is missing, or whose link
+    will not resolve, is simply left out."""
+    from pathlib import Path
+    target = target or st
+    here = Path(__file__).parent / "pages"
+    shown = 0
+    if include_self:
+        shown += safe_link(target, "app.py", "📦 Negative stock")
+    for fname, label, help_ in [
+            ("pdftoexcel.py", "📄 PDF to Excel / txt",
+             "Pull tables and text out of any PDF"),
+            ("invoice2itrade.py", "🧾 Supplier invoice → iTrade",
+             "Parse an invoice into a clean import file")]:
+        if (here / fname).exists():
+            shown += safe_link(target, f"pages/{fname}", label, help_)
+    if not shown:
+        target.caption("Use the page list in the sidebar to switch tools.")
 
 
 # ==================== UI ====================
@@ -842,7 +862,6 @@ st.title("📦 Negative Stock Adjustment Tool")
 
 with st.sidebar:
     st.markdown("### Tools")
-    st.page_link("app.py", label="📦 Negative stock", use_container_width=True)
     nav_links(st)
     st.divider()
     st.header("1. Data")
