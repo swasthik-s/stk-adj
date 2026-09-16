@@ -813,10 +813,38 @@ def get_store():
     return store_diagnosis()[0]
 
 
+
+# ==================== page navigation ====================
+def nav_links(where=None):
+    """Buttons to the other tools. Skips any page that is not deployed,
+    so a missing file never breaks this page."""
+    from pathlib import Path
+    target = where or st
+    here = Path(__file__).parent / "pages"
+    known = [("pdftoexcel.py", "📄 PDF to Excel / txt",
+              "Pull tables and text out of any PDF"),
+             ("invoice2itrade.py", "🧾 Supplier invoice → iTrade",
+              "Parse an invoice into a clean import file")]
+    live = [(f, label, help_) for f, label, help_ in known
+            if (here / f).exists()]
+    if not live:
+        return
+    for f, label, help_ in live:
+        try:
+            target.page_link(f"pages/{f}", label=label, help=help_,
+                             use_container_width=True)
+        except Exception:
+            target.caption(f"{label} — open it from the sidebar")
+
+
 # ==================== UI ====================
 st.title("📦 Negative Stock Adjustment Tool")
 
 with st.sidebar:
+    st.markdown("### Tools")
+    st.page_link("app.py", label="📦 Negative stock", use_container_width=True)
+    nav_links(st)
+    st.divider()
     st.header("1. Data")
     f_master = st.file_uploader("Masterlist (CSV)", type=["csv"])
     f_neg = st.file_uploader("Negative stock report (XLSX)", type=["xlsx", "xls"])
@@ -840,6 +868,8 @@ with st.sidebar:
 
 if not (f_master and f_neg):
     st.info("Upload the masterlist and the negative stock report in the sidebar to start.")
+    st.markdown("#### Other tools")
+    nav_links(st)
     st.stop()
 
 try:
