@@ -200,14 +200,18 @@ def to_excel(frames: dict) -> bytes:
     return buf.getvalue()
 
 
-def download_row(items):
-    """items: list of (label, data, filename, mime, primary)."""
+def download_row(items, ns="dl"):
+    """items: list of (label, data, filename, mime, primary).
+
+    ns keeps widget keys unique — two tabs can legitimately offer files with
+    the same name, and a key collision takes the whole page down."""
     cols = st.columns(len(items))
-    for col, (label, data, fname, mime, primary) in zip(cols, items):
+    for i, (col, (label, data, fname, mime, primary)) in enumerate(
+            zip(cols, items)):
         col.download_button(label, data, fname, mime,
                             use_container_width=True,
                             type="primary" if primary else "secondary",
-                            key=f"dl_{fname}")
+                            key=f"{ns}_{i}_{fname}")
 
 
 # ==================================================================== input
@@ -303,7 +307,7 @@ if len(inv):
             ("iTrade import", txt, f"{stem}.txt", "text/plain", False),
             ("CSV", inv.to_csv(index=False).encode(), f"{stem}.csv",
              "text/csv", False),
-        ])
+        ], ns="inv")
         with st.expander("Preview the import file"):
             st.code(txt.decode(), language=None)
         with st.expander("Copy barcodes"):
@@ -366,13 +370,14 @@ with tabs[ti]:
             ("CSV", cur.to_csv(index=False).encode(), f"{stem}_table.csv",
              "text/csv", False),
             ("Text", tsv, f"{stem}_table.txt", "text/plain", False),
-        ])
+        ], ns="tbl")
         if len(kept) > 1:
             st.download_button(
                 f"Excel — all {len(kept)} tables, one tab each",
                 to_excel({f"T{i+1}_{n}": d
                           for i, (n, d, _) in enumerate(kept)}),
-                f"{stem}_all_tables.xlsx", XL, use_container_width=True)
+                f"{stem}_all_tables.xlsx", XL, use_container_width=True,
+                key="dl_all_tables")
 
 # ===================================================================== text
 with tabs[ti + 1]:
@@ -395,7 +400,7 @@ with tabs[ti + 1]:
         ("Text", text.encode("utf-8"), f"{stem}.txt", "text/plain", True),
         ("Excel — one row per line", to_excel({"LINES": pd.DataFrame(rows)}),
          f"{stem}_lines.xlsx", XL, False),
-    ])
+    ], ns="txt")
 
     with st.expander("Find barcodes or any pattern"):
         pat = st.text_input("Regex", r"\b\d{8,14}\b")
