@@ -27,6 +27,7 @@ from bson.binary import Binary
 from pymongo import MongoClient, DESCENDING
 from pymongo.errors import PyMongoError
 
+STORE_VERSION = 2          # bump when methods are added
 MAX_DOC = 15 * 1024 * 1024          # leave headroom under Mongo's 16 MB limit
 
 
