@@ -31,6 +31,15 @@ if not PDF_OK:
     st.code("pdfplumber>=0.11", language=None)
     st.stop()
 
+with st.sidebar:
+    st.markdown("### Tools")
+    st.page_link("app.py", label="📦 Negative stock", use_container_width=True)
+    st.page_link("pages/pdftoexcel.py", label="📄 PDF to Excel / txt",
+                 use_container_width=True)
+    st.page_link("pages/invoice2itrade.py", label="🧾 Supplier invoice",
+                 use_container_width=True)
+    st.divider()
+
 XL = "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
 
 # Column names are matched loosely so other suppliers' layouts still work.
