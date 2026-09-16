@@ -1,0 +1,31 @@
+# Theme for the Al Madina stock tools.
+# Colours follow the printed adjustment sheet: red for the header band and
+# negatives, green reserved for a balanced total.
+
+[theme]
+base = "dark"
+
+primaryColor = "#E23D3D"            # buttons, focus rings, active tab
+backgroundColor = "#0E1117"         # page
+secondaryBackgroundColor = "#171B24" # cards, sidebar, table header
+textColor = "#E6E8EB"
+linkColor = "#7AA2F7"
+
+font = "sans-serif"
+headingFont = "sans-serif"
+codeFont = "monospace"
+
+baseRadius = "0.5rem"
+borderColor = "#2A2F3A"
+showWidgetBorder = true
+
+[theme.sidebar]
+backgroundColor = "#12161F"
+secondaryBackgroundColor = "#1B2029"
+borderColor = "#252A35"
+
+[server]
+maxUploadSize = 300
+
+[browser]
+gatherUsageStats = false
