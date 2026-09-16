@@ -1,11 +1,13 @@
 """
-PDF to Excel / txt
-------------------
-Pull tables and text out of a PDF — supplier invoices, delivery notes,
-price lists, statements — and download them as Excel or plain text.
+PDF → Excel / txt
+=================
+One page for every PDF job:
 
-Runs as a second page of the same Streamlit app, so it shares the
-deployment and the URL. Nothing here touches the negative stock data.
+* supplier invoices — line items pulled out, arithmetic checked against the
+  invoice's own totals, and the iTrade import file written for you
+* anything else — tables cleaned up, address blocks and totals panels
+  dropped, tables split across pages joined back together
+* raw text when there is no ruled table at all
 """
 
 import io
@@ -17,255 +19,393 @@ import streamlit as st
 try:
     import pdfplumber
     PDF_OK, PDF_ERR = True, None
-except Exception as e:  # keep the page usable, say why it is not
+except Exception as e:
     PDF_OK, PDF_ERR = False, f"{type(e).__name__}: {e}"
 
-st.title("📄 PDF to Excel / txt")
+st.title("📄 PDF → Excel / txt")
 
 if not PDF_OK:
     st.error(f"pdfplumber is not installed on the server. {PDF_ERR}")
     st.code("pdfplumber>=0.11", language=None)
-    st.caption("Add that line to requirements.txt and redeploy.")
     st.stop()
 
+XL = ("application/vnd.openxmlformats-officedocument"
+      ".spreadsheetml.sheet")
+
+ALIAS = {
+    "BARCODE": ["BARCODE", "ITEM CODE", "ITEMCODE", "CODE", "EAN"],
+    "DESCRIPTION": ["DESCRIPTION", "ITEM NAME", "PARTICULARS", "ITEM"],
+    "QTY": ["QTY", "QUANTITY", "RECD QTY", "REC QTY"],
+    "PRICE": ["UNIT PRICE", "RATE", "PRICE", "COST", "UNIT COST"],
+    "AMOUNT": ["AMOUNT", "VALUE", "NET AMOUNT"],
+    "UNIT": ["UNIT", "UOM"],
+    "SL": ["SL.NO", "SL NO", "S.NO", "SR.NO", "SR"],
+    "VAT": ["VAT AMT", "VAT AMOUNT", "TAX AMT"],
+    "AFTER": ["AFTER VAT AMT", "AFTER VAT", "GROSS"],
+}
 
 
-XL = "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
-
-up = st.file_uploader("PDF file", type=["pdf"])
-if up is None:
-    st.info("Upload a PDF to start. Works on invoices, delivery notes, "
-            "price lists and statements that have a real text layer.")
-    st.caption("A scanned or photographed PDF has no text layer — nothing "
-               "can be extracted from it without OCR, which this page does "
-               "not do.")
-    st.stop()
-
-
-@st.cache_data(show_spinner=False)
-def open_pdf(raw: bytes):
-    """Returns per-page text and tables, plus a flag for a missing text layer."""
-    pages = []
-    with pdfplumber.open(io.BytesIO(raw)) as pdf:
-        for i, page in enumerate(pdf.pages, start=1):
-            text = page.extract_text() or ""
-            tables = page.extract_tables() or []
-            pages.append({"n": i, "text": text, "tables": tables,
-                          "chars": len(text)})
-    return pages
-
-
-with st.spinner("Reading the PDF…"):
-    try:
-        pages = open_pdf(up.getvalue())
-    except Exception as e:
-        st.error(f"Could not read that file: {type(e).__name__}: {e}")
-        st.stop()
-
-total_chars = sum(p["chars"] for p in pages)
-total_tables = sum(len(p["tables"]) for p in pages)
-
-c1, c2, c3 = st.columns(3)
-c1.metric("Pages", len(pages))
-c2.metric("Tables found", total_tables)
-c3.metric("Characters of text", f"{total_chars:,}")
-
-if total_chars == 0:
-    st.error("No text layer in this PDF — it is a scan or a photo. "
-             "Extraction cannot work on it. You would need an OCR tool, "
-             "or the original file from the supplier.")
-    st.stop()
-
-tab_tables, tab_text = st.tabs(["Tables → Excel", "Text → txt"])
-
-# ---------------------------------------------------------------- tables
 def _clean(x):
     return re.sub(r"\s+", " ", str(x or "")).strip()
 
 
+def _num(x):
+    try:
+        return float(str(x).replace(",", "").strip())
+    except (TypeError, ValueError):
+        return None
+
+
+def _find(hdr, keys):
+    for k in keys:
+        if k in hdr:
+            return hdr.index(k)
+    for i, h in enumerate(hdr):
+        for k in keys:
+            if h and k in h:
+                return i
+    return None
+
+
 def header_score(row):
-    """How much a row looks like column headings: several short, distinct,
-    non-numeric cells."""
+    """How much a row looks like column headings."""
     cells = [_clean(c) for c in row]
     filled = [c for c in cells if c]
     if len(filled) < 3:
         return 0
+    numeric = sum(1 for c in filled if re.fullmatch(r"[\d,.\-]+", c))
+    if numeric >= len(filled) / 2:
+        return 0
     short = sum(1 for c in filled if len(c) <= 24)
     wordy = sum(1 for c in filled if re.search(r"[A-Za-z]", c))
-    numeric = sum(1 for c in filled if re.fullmatch(r"[\d,.\-]+", c))
-    distinct = len(set(filled))
-    return (short + wordy + distinct - numeric * 2) if numeric < len(filled) / 2 \
-        else 0
+    return short + wordy + len(set(filled))
 
 
-def tidy_table(raw_rows, min_rows=2):
-    """Find the heading row inside a raw table, drop everything above it,
-    and return a frame. None when it is not really a data table."""
-    if not raw_rows or len(raw_rows) < 2:
+def tidy_table(rows, min_rows=2):
+    """Strip the preamble above the headings and return a clean frame."""
+    if not rows or len(rows) < 2:
         return None, None
     best_i, best = None, 0
-    for i, r in enumerate(raw_rows[:8]):          # headings are near the top
+    for i, r in enumerate(rows[:8]):
         sc = header_score(r)
         if sc > best:
             best_i, best = i, sc
     if best_i is None:
         return None, None
 
-    hdr = [_clean(c) for c in raw_rows[best_i]]
-    hdr = [h if h else f"col{k}" for k, h in enumerate(hdr, start=1)]
+    hdr = [_clean(c) for c in rows[best_i]]
+    hdr = [h or f"col{k}" for k, h in enumerate(hdr, start=1)]
     body = []
-    for r in raw_rows[best_i + 1:]:
+    for r in rows[best_i + 1:]:
         cells = [_clean(c) for c in r]
         if not any(cells):
             continue
-        # a repeated heading row further down (page breaks) — skip it
-        if [c for c in cells if c] == [c for c in hdr if not c.startswith("col")]:
-            continue
-        if header_score(r) >= best and len([c for c in cells if c]) >= 3:
+        if header_score(r) >= best:          # heading repeated at a page break
             continue
         body.append(cells[:len(hdr)] + [""] * max(0, len(hdr) - len(cells)))
 
     if len(body) < min_rows:
         return None, None
     df = pd.DataFrame(body, columns=hdr)
-    df = df.loc[:, ~(df == "").all(axis=0)]       # drop empty columns
-    df = df.loc[~(df == "").all(axis=1)]          # drop empty rows
+    df = df.loc[:, ~(df == "").all(axis=0)]
+    df = df.loc[~(df == "").all(axis=1)]
     if df.shape[1] < 3 or len(df) < min_rows:
         return None, None
     return df, tuple(df.columns)
 
 
-with tab_tables:
-    only_data = st.checkbox(
-        "Only real data tables", True,
-        help="Skips address blocks, invoice headers and totals boxes — "
-             "anything without proper column headings and at least two rows.")
-    merge_same = st.checkbox(
-        "Join tables that share the same columns", True,
-        help="A line-item table split across pages becomes one table.")
+@st.cache_data(show_spinner=False)
+def read_pdf(raw: bytes):
+    pages, tables = [], []
+    with pdfplumber.open(io.BytesIO(raw)) as pdf:
+        for i, page in enumerate(pdf.pages, start=1):
+            text = page.extract_text() or ""
+            pages.append({"n": i, "text": text})
+            for j, t in enumerate(page.extract_tables() or [], start=1):
+                tables.append((i, j, t))
+    return pages, tables
 
-    raw_tables = [(p["n"], j, t) for p in pages
-                  for j, t in enumerate(p["tables"], start=1)]
+
+def invoice_lines(tables):
+    """Line items, if any table carries a BARCODE and a QTY column."""
+    out = []
+    for pno, _, tb in tables:
+        hrow = hdr = None
+        for i, r in enumerate(tb):
+            h = [_clean(c).upper() for c in r]
+            if (_find(h, ALIAS["BARCODE"]) is not None
+                    and _find(h, ALIAS["QTY"]) is not None):
+                hrow, hdr = i, h
+                break
+        if hrow is None:
+            continue
+        ix = {k: _find(hdr, v) for k, v in ALIAS.items()}
+        for r in tb[hrow + 1:]:
+            code = (_clean(r[ix["BARCODE"]]) if ix["BARCODE"] is not None
+                    and ix["BARCODE"] < len(r) else "")
+            if not re.fullmatch(r"\d{6,14}", code):
+                continue
+
+            def cell(key, as_num=False):
+                i = ix.get(key)
+                if i is None or i >= len(r):
+                    return None if as_num else ""
+                return _num(r[i]) if as_num else _clean(r[i])
+
+            out.append({"SL": cell("SL", True), "Barcode": code,
+                        "Description": cell("DESCRIPTION"),
+                        "Unit": cell("UNIT"), "Qty": cell("QTY", True),
+                        "UnitPrice": cell("PRICE", True),
+                        "Amount": cell("AMOUNT", True),
+                        "VatAmt": cell("VAT", True),
+                        "AfterVat": cell("AFTER", True)})
+    df = pd.DataFrame(out)
+    if len(df):
+        df = df.drop_duplicates(subset=["SL", "Barcode"]).reset_index(drop=True)
+    return df
+
+
+def invoice_head(full):
+    def grab(pat):
+        m = re.search(pat, full, re.I)
+        return m.group(1).strip() if m else None
+    return {"Invoice no": grab(r"INV NO\s*:?\s*([A-Z0-9\-/]+)"),
+            "Date": grab(r"Date\s*:?\s*(\d{1,2}-[A-Za-z]{3}-\d{4})"),
+            "Supplier TRN": grab(r"TRN\s*:?\s*(\d{10,20})"),
+            "Total": _num(grab(r"\bTotal\s+([\d,]+\.\d\d)")),
+            "VAT": _num(grab(r"\bVAT\s+([\d,]+\.\d\d)")),
+            "Net Total": _num(grab(r"Net Total\s+([\d,]+\.\d\d)"))}
+
+
+def fmt(x, dp=7):
+    if x is None:
+        return "0"
+    return f"{float(x):.{dp}f}".rstrip("0").rstrip(".") or "0"
+
+
+def to_excel(frames: dict) -> bytes:
+    buf = io.BytesIO()
+    with pd.ExcelWriter(buf, engine="openpyxl") as xw:
+        for name, df in frames.items():
+            sheet = re.sub(r"[^A-Za-z0-9_ ]", "", str(name))[:31] or "SHEET"
+            df.to_excel(xw, sheet_name=sheet, index=False)
+            ws = xw.sheets[sheet]
+            for col in ws.iter_cols(min_row=1, max_row=1):
+                letter = col[0].column_letter
+                width = max(len(str(col[0].value or "")) + 2, 12)
+                body = [len(str(ws.cell(row=r, column=col[0].column).value or ""))
+                        for r in range(2, min(ws.max_row, 60) + 1)]
+                ws.column_dimensions[letter].width = min(
+                    max([width] + body) + 2, 48)
+    return buf.getvalue()
+
+
+def download_row(items):
+    """items: list of (label, data, filename, mime, primary)."""
+    cols = st.columns(len(items))
+    for col, (label, data, fname, mime, primary) in zip(cols, items):
+        col.download_button(label, data, fname, mime,
+                            use_container_width=True,
+                            type="primary" if primary else "secondary",
+                            key=f"dl_{fname}")
+
+
+# ==================================================================== input
+up = st.file_uploader("PDF file", type=["pdf"])
+if up is None:
+    st.info("Upload a PDF. Supplier invoices get their line items, totals "
+            "check and iTrade import file. Anything else gets its tables "
+            "cleaned up and its text extracted.")
+    st.caption("A scanned or photographed PDF has no text layer, so nothing "
+               "can be pulled out of it without OCR.")
+    st.stop()
+
+with st.spinner("Reading…"):
+    try:
+        pages, raw_tables = read_pdf(up.getvalue())
+    except Exception as e:
+        st.error(f"Could not read that file: {type(e).__name__}: {e}")
+        st.stop()
+
+full = "\n".join(p["text"] for p in pages)
+if not full.strip():
+    st.error("No text layer — this is a scan or a photo. Nothing can be "
+             "extracted without OCR. Ask the supplier for the original file.")
+    st.stop()
+
+inv = invoice_lines(raw_tables)
+head = invoice_head(full)
+stem = re.sub(r"[^A-Za-z0-9]+", "_",
+              (head.get("Invoice no") or up.name.rsplit(".", 1)[0]))[:40]
+
+m1, m2, m3, m4 = st.columns(4)
+m1.metric("Pages", len(pages))
+m2.metric("Blocks found", len(raw_tables))
+m3.metric("Invoice lines", len(inv) if len(inv) else "—")
+m4.metric("Invoice no", head.get("Invoice no") or "—")
+
+tabs = st.tabs((["Invoice"] if len(inv) else []) + ["Tables", "Text"])
+ti = 0
+
+# ================================================================== invoice
+if len(inv):
+    with tabs[0]:
+        ti = 1
+        c1, c2, c3 = st.columns(3)
+        s_amt = float(inv["Amount"].sum()) if inv["Amount"].notna().any() else None
+        if s_amt is not None and head.get("Total"):
+            d = round(s_amt - head["Total"], 2)
+            c1.metric("Lines vs invoice Total", f"{s_amt:,.2f}", f"{d:+.2f}",
+                      delta_color="off")
+            (c1.success if abs(d) <= 0.05 else c1.error)(
+                "Matches" if abs(d) <= 0.05 else "Lines may be missing")
+        s_gross = (float(inv["AfterVat"].sum())
+                   if inv["AfterVat"].notna().any() else None)
+        if s_gross is not None and head.get("Net Total"):
+            d2 = round(s_gross - head["Net Total"], 2)
+            c2.metric("After VAT vs Net Total", f"{s_gross:,.2f}", f"{d2:+.2f}",
+                      delta_color="off")
+            (c2.success if abs(d2) <= 0.05 else c2.error)(
+                "Matches" if abs(d2) <= 0.05 else "Does not match")
+        calc = (inv["Qty"] * inv["UnitPrice"]).round(2)
+        off = inv[(calc - inv["Amount"].round(2)).abs() > 0.02]
+        c3.metric("qty × price ≠ amount", len(off))
+        if len(off):
+            with c3.expander("Which rows"):
+                st.dataframe(off[["SL", "Description", "Qty", "UnitPrice",
+                                  "Amount"]], use_container_width=True,
+                             hide_index=True)
+
+        st.dataframe(inv, use_container_width=True, height=400, hide_index=True,
+                     column_config={
+                         "Barcode": st.column_config.TextColumn(width="medium"),
+                         "Description": st.column_config.TextColumn(
+                             width="large"),
+                         "Qty": st.column_config.NumberColumn(format="%.3f"),
+                         "UnitPrice": st.column_config.NumberColumn(
+                             format="%.4f"),
+                         "Amount": st.column_config.NumberColumn(format="%.2f")})
+
+        o1, o2 = st.columns([1, 2])
+        prefix = o1.text_input("Import prefix", "SML")
+        o2.caption("Import file layout: prefix, barcode, unit price, quantity "
+                   "— no header, no quotes.")
+        txt = ("\n".join(f"{prefix},{r.Barcode},{fmt(r.UnitPrice)},"
+                         f"{fmt(r.Qty, 3)}" for r in inv.itertuples()
+                         if r.UnitPrice is not None) + "\n").encode("ascii",
+                                                                    "ignore")
+        xl = to_excel({"LINES": inv.drop(columns=["SL"]),
+                       "INVOICE": pd.DataFrame(
+                           [(k, v) for k, v in head.items()],
+                           columns=["Field", "Value"])})
+        download_row([
+            ("Excel", xl, f"{stem}.xlsx", XL, True),
+            ("iTrade import", txt, f"{stem}.txt", "text/plain", False),
+            ("CSV", inv.to_csv(index=False).encode(), f"{stem}.csv",
+             "text/csv", False),
+        ])
+        with st.expander("Preview the import file"):
+            st.code(txt.decode(), language=None)
+        with st.expander("Copy barcodes"):
+            st.code("\n".join(inv["Barcode"]), language=None)
+
+# =================================================================== tables
+with tabs[ti]:
+    f1, f2 = st.columns(2)
+    only_data = f1.checkbox("Data tables only", True,
+                            help="Drops address blocks, invoice header boxes "
+                                 "and totals panels.")
+    merge_same = f2.checkbox("Join tables with matching columns", True,
+                             help="A table split across pages becomes one.")
+
     kept, skipped = [], []
     for pno, j, t in raw_tables:
-        df, sig = tidy_table(t, min_rows=2 if only_data else 1)
+        df, sig = tidy_table(t, 2 if only_data else 1)
         if df is None:
-            skipped.append((f"p{pno}_t{j}", len(t)))
+            skipped.append({"Block": f"page {pno}, block {j}",
+                            "Raw rows": len(t)})
             if only_data:
                 continue
-            df = pd.DataFrame(t).replace({None: ""}).astype(str)
-            sig = None
-        kept.append((f"p{pno}_t{j}", df, sig))
+            df, sig = pd.DataFrame(t).fillna("").astype(str), None
+        kept.append([f"page {pno}", df, sig])
 
     if merge_same and kept:
         groups, order = {}, []
         for name, df, sig in kept:
             key = sig or name
-            if key not in groups:
-                groups[key] = [name, df]
-                order.append(key)
-            else:
-                groups[key][0] += f"+p{name.split('_')[0][1:]}"
+            if key in groups:
                 groups[key][1] = pd.concat([groups[key][1], df],
                                            ignore_index=True)
-        kept = [(groups[k][0], groups[k][1], k) for k in order]
+                groups[key][0] += f", {name.split()[-1]}"
+            else:
+                groups[key] = [name, df]
+                order.append(key)
+        kept = [[groups[k][0], groups[k][1], k] for k in order]
 
-    c1, c2 = st.columns(2)
-    c1.metric("Data tables kept", len(kept))
-    c2.metric("Blocks skipped", len(skipped))
+    k1, k2 = st.columns(2)
+    k1.metric("Tables kept", len(kept))
+    k2.metric("Blocks skipped", len(skipped))
     if skipped:
         with st.expander("What was skipped"):
-            st.caption("Address blocks, invoice header boxes, totals panels — "
-                       "no column headings or fewer than two rows.")
-            st.dataframe(pd.DataFrame(skipped, columns=["Block", "Raw rows"]),
-                         use_container_width=True, hide_index=True)
+            st.dataframe(pd.DataFrame(skipped), use_container_width=True,
+                         hide_index=True)
 
     if not kept:
-        st.warning("Nothing that looks like a data table. Untick the box above "
-                   "to see every block, or use the Text tab.")
+        st.warning("Nothing that looks like a data table. Untick the box "
+                   "above to see everything, or use the Text tab.")
     else:
-        which = st.selectbox("Table",
-                             [f"{n}  ({len(d)} rows × {d.shape[1]} cols)"
-                              for n, d, _ in kept])
-        prev = kept[[f"{n}  ({len(d)} rows × {d.shape[1]} cols)"
-                     for n, d, _ in kept].index(which)][1]
-        st.dataframe(prev, use_container_width=True, height=380,
-                     hide_index=True)
+        labels = [f"{n} · {len(d)} rows × {d.shape[1]} cols"
+                  for n, d, _ in kept]
+        pick = labels[0] if len(labels) == 1 else st.selectbox("Table", labels)
+        cur = kept[labels.index(pick)][1]
+        st.dataframe(cur, use_container_width=True, height=380, hide_index=True)
 
-        buf_one = io.BytesIO()
-        with pd.ExcelWriter(buf_one, engine="openpyxl") as xw:
-            prev.to_excel(xw, sheet_name="TABLE", index=False)
+        tsv = cur.to_csv(index=False, sep="\t").encode()
+        download_row([
+            ("Excel", to_excel({"TABLE": cur}), f"{stem}_table.xlsx", XL, True),
+            ("CSV", cur.to_csv(index=False).encode(), f"{stem}_table.csv",
+             "text/csv", False),
+            ("Text", tsv, f"{stem}_table.txt", "text/plain", False),
+        ])
+        if len(kept) > 1:
+            st.download_button(
+                f"Excel — all {len(kept)} tables, one tab each",
+                to_excel({f"T{i+1}_{n}": d
+                          for i, (n, d, _) in enumerate(kept)}),
+                f"{stem}_all_tables.xlsx", XL, use_container_width=True)
 
-        buf_all = io.BytesIO()
-        with pd.ExcelWriter(buf_all, engine="openpyxl") as xw:
-            for name, df, _ in kept:
-                df.to_excel(xw, sheet_name=re.sub(r"[^A-Za-z0-9_]", "",
-                                                  name)[:31] or "T",
-                            index=False)
+# ===================================================================== text
+with tabs[ti + 1]:
+    pick_pages = st.multiselect("Pages", [p["n"] for p in pages],
+                                default=[p["n"] for p in pages])
+    keep = [p for p in pages if p["n"] in pick_pages]
+    marker = st.checkbox("Mark page breaks", False)
+    parts = [(f"--- page {p['n']} ---\n{p['text']}" if marker else p["text"])
+             for p in keep]
+    text = re.sub(r"\n{3,}", "\n\n", "\n\n".join(parts))
 
-        d1, d2 = st.columns(2)
-        d1.download_button("⬇ Excel — this table", buf_one.getvalue(),
-                           "table.xlsx", XL, use_container_width=True,
-                           type="primary")
-        d2.download_button("⬇ Csv — this table",
-                           prev.to_csv(index=False).encode(), "table.csv",
-                           "text/csv", use_container_width=True)
-        st.download_button(f"⬇ Excel — all {len(kept)} tables, one tab each",
-                           buf_all.getvalue(), "tables.xlsx", XL,
-                           use_container_width=True)
-
-# ---------------------------------------------------------------- text
-with tab_text:
-    pick = st.multiselect("Pages", [p["n"] for p in pages],
-                          default=[p["n"] for p in pages])
-    keep = [p for p in pages if p["n"] in pick]
-    joiner = st.radio("Between pages", ["Blank line", "Page marker", "Nothing"],
-                      horizontal=True)
-
-    parts = []
-    for p in keep:
-        if joiner == "Page marker":
-            parts.append(f"--- page {p['n']} ---\n{p['text']}")
-        else:
-            parts.append(p["text"])
-    text = ("\n\n" if joiner == "Blank line" else "\n").join(parts)
-
-    strip_blanks = st.checkbox("Collapse repeated blank lines", True)
-    if strip_blanks:
-        text = re.sub(r"\n{3,}", "\n\n", text)
-
-    st.text_area("Preview", text[:6000], height=320)
+    st.text_area("Preview", text[:6000], height=300)
     if len(text) > 6000:
         st.caption(f"Showing the first 6,000 of {len(text):,} characters.")
 
-    t1, t2 = st.columns(2)
-    t1.download_button("⬇ Txt — selected pages", text.encode("utf-8"),
-                       f"{up.name.rsplit('.', 1)[0]}.txt", "text/plain",
-                       use_container_width=True, type="primary")
-
     rows = [{"page": p["n"], "line": i + 1, "text": ln}
-            for p in keep for i, ln in enumerate(p["text"].splitlines()) if ln.strip()]
-    buf = io.BytesIO()
-    with pd.ExcelWriter(buf, engine="openpyxl") as xw:
-        pd.DataFrame(rows).to_excel(xw, sheet_name="LINES", index=False)
-    t2.download_button("⬇ Excel — one row per line", buf.getvalue(),
-                       f"{up.name.rsplit('.', 1)[0]}_lines.xlsx", XL,
-                       use_container_width=True,
-                       help="Useful when the layout has no ruled table — "
-                            "split the column in Excel afterwards.")
+            for p in keep
+            for i, ln in enumerate(p["text"].splitlines()) if ln.strip()]
+    download_row([
+        ("Text", text.encode("utf-8"), f"{stem}.txt", "text/plain", True),
+        ("Excel — one row per line", to_excel({"LINES": pd.DataFrame(rows)}),
+         f"{stem}_lines.xlsx", XL, False),
+    ])
 
-    with st.expander("Find barcodes and numbers in the text"):
-        pat = st.text_input("Pattern (regex)", r"\b\d{8,14}\b",
-                            help="Default finds 8 to 14 digit runs, which "
-                                 "covers most barcodes.")
+    with st.expander("Find barcodes or any pattern"):
+        pat = st.text_input("Regex", r"\b\d{8,14}\b")
         try:
-            found = re.findall(pat, text)
+            found = list(dict.fromkeys(re.findall(pat, text)))
         except re.error as e:
             st.error(f"Bad pattern: {e}")
             found = []
         if found:
-            uniq = list(dict.fromkeys(found))
-            st.caption(f"{len(found)} matches, {len(uniq)} unique")
-            st.code("\n".join(uniq), language=None)
+            st.caption(f"{len(found)} unique matches")
+            st.code("\n".join(found), language=None)
         else:
             st.caption("No matches.")
