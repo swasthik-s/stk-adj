@@ -31,14 +31,25 @@ if not PDF_OK:
     st.code("pdfplumber>=0.11", language=None)
     st.stop()
 
+def _link(path, label):
+    """Paths resolve differently depending on how the app was started, so
+    try the likely spellings and skip the link if none of them work."""
+    from pathlib import Path
+    root = Path(__file__).parent.parent
+    for t in dict.fromkeys([path, path.split("/")[-1], str(root / path)]):
+        try:
+            st.sidebar.page_link(t, label=label, use_container_width=True)
+            return
+        except Exception:
+            continue
+
+
 with st.sidebar:
     st.markdown("### Tools")
-    st.page_link("app.py", label="📦 Negative stock", use_container_width=True)
-    st.page_link("pages/pdftoexcel.py", label="📄 PDF to Excel / txt",
-                 use_container_width=True)
-    st.page_link("pages/invoice2itrade.py", label="🧾 Supplier invoice",
-                 use_container_width=True)
-    st.divider()
+_link("app.py", "📦 Negative stock")
+_link("pages/pdftoexcel.py", "📄 PDF to Excel / txt")
+_link("pages/invoice2itrade.py", "🧾 Supplier invoice")
+st.sidebar.divider()
 
 XL = "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
 
