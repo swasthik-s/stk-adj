@@ -7,8 +7,7 @@ locally and on Streamlit Cloud.
 
     app.py                     this router
     pages/negative_stock.py    negative stock adjustments
-    pages/invoice2itrade.py    supplier invoice -> Excel / iTrade txt
-    pages/pdftoexcel.py        any PDF -> Excel / txt
+    pages/pdf_tools.py         invoices and any other PDF -> Excel / txt
 
 st.set_page_config belongs here and nowhere else — a page script that
 calls it again raises an error.
@@ -24,8 +23,7 @@ st.set_page_config(page_title="Al Madina Stock Tools", page_icon="📦",
 HERE = Path(__file__).parent
 PAGES = [
     ("pages/negative_stock.py", "Negative stock", "📦", True),
-    ("pages/invoice2itrade.py", "Supplier invoice", "🧾", False),
-    ("pages/pdftoexcel.py", "PDF to Excel", "📄", False),
+    ("pages/pdf_tools.py", "PDF to Excel / txt", "📄", False),
 ]
 
 found, missing = [], []
