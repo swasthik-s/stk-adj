@@ -79,75 +79,140 @@ if total_chars == 0:
 tab_tables, tab_text = st.tabs(["Tables → Excel", "Text → txt"])
 
 # ---------------------------------------------------------------- tables
+def _clean(x):
+    return re.sub(r"\s+", " ", str(x or "")).strip()
+
+
+def header_score(row):
+    """How much a row looks like column headings: several short, distinct,
+    non-numeric cells."""
+    cells = [_clean(c) for c in row]
+    filled = [c for c in cells if c]
+    if len(filled) < 3:
+        return 0
+    short = sum(1 for c in filled if len(c) <= 24)
+    wordy = sum(1 for c in filled if re.search(r"[A-Za-z]", c))
+    numeric = sum(1 for c in filled if re.fullmatch(r"[\d,.\-]+", c))
+    distinct = len(set(filled))
+    return (short + wordy + distinct - numeric * 2) if numeric < len(filled) / 2 \
+        else 0
+
+
+def tidy_table(raw_rows, min_rows=2):
+    """Find the heading row inside a raw table, drop everything above it,
+    and return a frame. None when it is not really a data table."""
+    if not raw_rows or len(raw_rows) < 2:
+        return None, None
+    best_i, best = None, 0
+    for i, r in enumerate(raw_rows[:8]):          # headings are near the top
+        sc = header_score(r)
+        if sc > best:
+            best_i, best = i, sc
+    if best_i is None:
+        return None, None
+
+    hdr = [_clean(c) for c in raw_rows[best_i]]
+    hdr = [h if h else f"col{k}" for k, h in enumerate(hdr, start=1)]
+    body = []
+    for r in raw_rows[best_i + 1:]:
+        cells = [_clean(c) for c in r]
+        if not any(cells):
+            continue
+        # a repeated heading row further down (page breaks) — skip it
+        if [c for c in cells if c] == [c for c in hdr if not c.startswith("col")]:
+            continue
+        if header_score(r) >= best and len([c for c in cells if c]) >= 3:
+            continue
+        body.append(cells[:len(hdr)] + [""] * max(0, len(hdr) - len(cells)))
+
+    if len(body) < min_rows:
+        return None, None
+    df = pd.DataFrame(body, columns=hdr)
+    df = df.loc[:, ~(df == "").all(axis=0)]       # drop empty columns
+    df = df.loc[~(df == "").all(axis=1)]          # drop empty rows
+    if df.shape[1] < 3 or len(df) < min_rows:
+        return None, None
+    return df, tuple(df.columns)
+
+
 with tab_tables:
-    if not total_tables:
-        st.warning("pdfplumber found no ruled tables. If the data is laid out "
-                   "in columns without lines, use the Text tab and split it "
-                   "there instead.")
+    only_data = st.checkbox(
+        "Only real data tables", True,
+        help="Skips address blocks, invoice headers and totals boxes — "
+             "anything without proper column headings and at least two rows.")
+    merge_same = st.checkbox(
+        "Join tables that share the same columns", True,
+        help="A line-item table split across pages becomes one table.")
+
+    raw_tables = [(p["n"], j, t) for p in pages
+                  for j, t in enumerate(p["tables"], start=1)]
+    kept, skipped = [], []
+    for pno, j, t in raw_tables:
+        df, sig = tidy_table(t, min_rows=2 if only_data else 1)
+        if df is None:
+            skipped.append((f"p{pno}_t{j}", len(t)))
+            if only_data:
+                continue
+            df = pd.DataFrame(t).replace({None: ""}).astype(str)
+            sig = None
+        kept.append((f"p{pno}_t{j}", df, sig))
+
+    if merge_same and kept:
+        groups, order = {}, []
+        for name, df, sig in kept:
+            key = sig or name
+            if key not in groups:
+                groups[key] = [name, df]
+                order.append(key)
+            else:
+                groups[key][0] += f"+p{name.split('_')[0][1:]}"
+                groups[key][1] = pd.concat([groups[key][1], df],
+                                           ignore_index=True)
+        kept = [(groups[k][0], groups[k][1], k) for k in order]
+
+    c1, c2 = st.columns(2)
+    c1.metric("Data tables kept", len(kept))
+    c2.metric("Blocks skipped", len(skipped))
+    if skipped:
+        with st.expander("What was skipped"):
+            st.caption("Address blocks, invoice header boxes, totals panels — "
+                       "no column headings or fewer than two rows.")
+            st.dataframe(pd.DataFrame(skipped, columns=["Block", "Raw rows"]),
+                         use_container_width=True, hide_index=True)
+
+    if not kept:
+        st.warning("Nothing that looks like a data table. Untick the box above "
+                   "to see every block, or use the Text tab.")
     else:
-        first_row_header = st.checkbox("Use the first row of each table as "
-                                       "the column headings", True)
-        drop_empty = st.checkbox("Drop completely empty rows and columns", True)
+        which = st.selectbox("Table",
+                             [f"{n}  ({len(d)} rows × {d.shape[1]} cols)"
+                              for n, d, _ in kept])
+        prev = kept[[f"{n}  ({len(d)} rows × {d.shape[1]} cols)"
+                     for n, d, _ in kept].index(which)][1]
+        st.dataframe(prev, use_container_width=True, height=380,
+                     hide_index=True)
 
-        frames = []
-        for p in pages:
-            for j, t in enumerate(p["tables"], start=1):
-                if not t:
-                    continue
-                df = pd.DataFrame(t)
-                if drop_empty:
-                    df = df.replace({None: ""}).astype(str)
-                    df = df.loc[~(df == "").all(axis=1), ~(df == "").all(axis=0)]
-                if first_row_header and len(df) > 1:
-                    df.columns = [str(c).strip() or f"col{k}"
-                                  for k, c in enumerate(df.iloc[0], start=1)]
-                    df = df.iloc[1:].reset_index(drop=True)
-                if len(df):
-                    frames.append((f"p{p['n']}_t{j}", df))
+        buf_one = io.BytesIO()
+        with pd.ExcelWriter(buf_one, engine="openpyxl") as xw:
+            prev.to_excel(xw, sheet_name="TABLE", index=False)
 
-        if not frames:
-            st.warning("Tables were detected but came out empty after cleaning.")
-        else:
-            st.caption(f"{len(frames)} table(s). Pick one to preview.")
-            which = st.selectbox("Table", [n for n, _ in frames])
-            prev = dict(frames)[which]
-            st.dataframe(prev, use_container_width=True, height=360)
+        buf_all = io.BytesIO()
+        with pd.ExcelWriter(buf_all, engine="openpyxl") as xw:
+            for name, df, _ in kept:
+                df.to_excel(xw, sheet_name=re.sub(r"[^A-Za-z0-9_]", "",
+                                                  name)[:31] or "T",
+                            index=False)
 
-            buf_one = io.BytesIO()
-            with pd.ExcelWriter(buf_one, engine="openpyxl") as xw:
-                prev.to_excel(xw, sheet_name=which[:31], index=False)
-
-            buf_all = io.BytesIO()
-            with pd.ExcelWriter(buf_all, engine="openpyxl") as xw:
-                for name, df in frames:
-                    df.to_excel(xw, sheet_name=name[:31], index=False)
-
-            stacked = pd.concat(
-                [df.assign(_source=name) for name, df in frames
-                 if list(df.columns) == list(frames[0][1].columns)],
-                ignore_index=True) if len(frames) > 1 else frames[0][1]
-            buf_stack = io.BytesIO()
-            with pd.ExcelWriter(buf_stack, engine="openpyxl") as xw:
-                stacked.to_excel(xw, sheet_name="ALL", index=False)
-
-            d1, d2 = st.columns(2)
-            d1.download_button(f"⬇ Excel — this table ({which})",
-                               buf_one.getvalue(), f"{which}.xlsx", XL,
-                               use_container_width=True, type="primary")
-            d2.download_button(f"⬇ Csv — this table ({which})",
-                               prev.to_csv(index=False).encode(),
-                               f"{which}.csv", "text/csv",
-                               use_container_width=True)
-
-            d3, d4 = st.columns(2)
-            d3.download_button(f"⬇ Excel — all {len(frames)} tables, one tab each",
-                               buf_all.getvalue(), "tables_by_page.xlsx", XL,
-                               use_container_width=True)
-            d4.download_button("⬇ Excel — all tables stacked into one sheet",
-                               buf_stack.getvalue(), "tables_stacked.xlsx", XL,
-                               use_container_width=True,
-                               help="Only stacks tables whose columns match "
-                                    "the first one.")
+        d1, d2 = st.columns(2)
+        d1.download_button("⬇ Excel — this table", buf_one.getvalue(),
+                           "table.xlsx", XL, use_container_width=True,
+                           type="primary")
+        d2.download_button("⬇ Csv — this table",
+                           prev.to_csv(index=False).encode(), "table.csv",
+                           "text/csv", use_container_width=True)
+        st.download_button(f"⬇ Excel — all {len(kept)} tables, one tab each",
+                           buf_all.getvalue(), "tables.xlsx", XL,
+                           use_container_width=True)
 
 # ---------------------------------------------------------------- text
 with tab_text:
