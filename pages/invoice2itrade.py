@@ -23,7 +23,6 @@ try:
 except Exception as e:
     PDF_OK, PDF_ERR = False, f"{type(e).__name__}: {e}"
 
-st.set_page_config(page_title="Invoice to iTrade", page_icon="🧾", layout="wide")
 st.title("🧾 Supplier invoice → Excel / iTrade txt")
 
 if not PDF_OK:
@@ -31,25 +30,7 @@ if not PDF_OK:
     st.code("pdfplumber>=0.11", language=None)
     st.stop()
 
-def _link(path, label):
-    """Paths resolve differently depending on how the app was started, so
-    try the likely spellings and skip the link if none of them work."""
-    from pathlib import Path
-    root = Path(__file__).parent.parent
-    for t in dict.fromkeys([path, path.split("/")[-1], str(root / path)]):
-        try:
-            st.sidebar.page_link(t, label=label, use_container_width=True)
-            return
-        except Exception:
-            continue
 
-
-with st.sidebar:
-    st.markdown("### Tools")
-_link("app.py", "📦 Negative stock")
-_link("pages/pdftoexcel.py", "📄 PDF to Excel / txt")
-_link("pages/invoice2itrade.py", "🧾 Supplier invoice")
-st.sidebar.divider()
 
 XL = "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
 
