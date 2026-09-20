@@ -42,10 +42,13 @@ if not found:
 if missing:
     st.sidebar.warning("Not deployed: " + ", ".join(missing))
 
-# Older Streamlit builds have no st.navigation. Run the first page directly
-# so the tool still works rather than showing a stack trace.
+# Older Streamlit builds have no st.navigation, and position="top" only
+# arrived in 1.44 — fall back cleanly rather than showing a stack trace.
 if hasattr(st, "navigation"):
-    st.navigation(found).run()
+    try:
+        st.navigation(found, position="top").run()
+    except TypeError:
+        st.navigation(found).run()      # older signature, sidebar nav
 else:
     st.sidebar.info("This Streamlit version has no multipage navigation — "
                     "showing the negative stock tool only.")
