@@ -1046,18 +1046,23 @@ def get_store():
 # ==================== UI ====================
 st.title("📦 Negative Stock Adjustment Tool")
 
-with st.sidebar:
-    st.header("1. Data")
+# ---- controls in a row of dropdowns, not a sidebar -------------------
+b1, b2, b3, b4 = st.columns([2, 2, 2, 3])
+
+with b1.popover("📂 Data", use_container_width=True):
     f_master = st.file_uploader("Masterlist (CSV)", type=["csv"])
-    f_neg = st.file_uploader("Negative stock report (XLSX)", type=["xlsx", "xls"])
-    st.header("2. Sheet details")
+    f_neg = st.file_uploader("Negative stock report (XLSX)",
+                             type=["xlsx", "xls"])
+
+with b2.popover("✍ Sheet details", use_container_width=True):
     adj_date = st.text_input("Date", "11-09-26")
     prepared = st.text_input("Prepared by", "SWASTHIK")
     checked = st.text_input("Checked by", "IRSHAD")
     verified = st.text_input("Verified by", "THALLATH")
     txt_prefix = st.text_input("Import file prefix", "SML",
                                help="First field of every line in the .txt")
-    st.header("3. Matching")
+
+with b3.popover("⚙ Matching", use_container_width=True):
     br_thresh = st.slider("Bundle break strictness", 0.70, 1.00, 0.80, 0.01,
                           help="Higher = fewer but safer matches")
     sw_lo, sw_hi = st.slider("Wrong sale similarity window", 0.40, 1.00,
@@ -1068,8 +1073,16 @@ with st.sidebar:
                           help="A real break barely moves the item's cost. "
                                "A big drift usually means the pair is wrong.")
 
+with b4:
+    if f_master and f_neg:
+        st.caption(f"📄 {f_master.name}  ·  {f_neg.name}"
+                   f"    |    {adj_date}  ·  {prepared}")
+    else:
+        st.caption("Open **Data** and load the two files to start.")
+
 if not (f_master and f_neg):
-    st.info("Upload the masterlist and the negative stock report in the sidebar to start.")
+    st.info("Open **📂 Data** above and upload the masterlist and the "
+            "negative stock report.")
     st.stop()
 
 try:
