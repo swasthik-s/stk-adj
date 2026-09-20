@@ -90,6 +90,9 @@ SIZE = re.compile(r"\b\d+(?:\.\d+)?\s?(?:GM|G|KG|ML|LTR|L)\b", re.I)
 
 
 
+XLSX_MIME = ("application/vnd.openxmlformats-officedocument"
+             ".spreadsheetml.sheet")
+
 # ==================== display helpers ====================
 
 
@@ -152,18 +155,22 @@ def colour_money(df, cols):
 # ==================== parsing ====================
 @st.cache_data(show_spinner=False)
 def load_master(raw: bytes) -> pd.DataFrame:
-    want = ["Item Barcode", "Item No", "Item Name", "Stock", "Cost",
+    want = ["Item Barcode", "Item No", "Item Name", "Stock", "Cost", "WAC",
             "Net MRP", "Is Active", "Category", "Group", "Brand"]
     head = pd.read_csv(io.BytesIO(raw), dtype=str, encoding="latin-1", nrows=0)
     use = [c for c in want if c in head.columns]
     m = pd.read_csv(io.BytesIO(raw), dtype=str, encoding="latin-1", usecols=use)
     m["Item Barcode"] = m["Item Barcode"].astype(str).str.strip()
-    for src, dst in (("Stock", "stock"), ("Cost", "cost"), ("Net MRP", "mrp")):
+    for src, dst in (("Stock", "stock"), ("Cost", "last_cost"),
+                     ("WAC", "wac"), ("Net MRP", "mrp")):
         m[dst] = (
             pd.to_numeric(m[src].astype(str).str.replace(",", "", regex=False),
                           errors="coerce").fillna(0)
             if src in m.columns else 0.0
         )
+    # iTrade values stock at the higher of last cost and weighted average.
+    # Break at the lower figure and the adjustment under-clears the value.
+    m["cost"] = m[["last_cost", "wac"]].max(axis=1)
     if "Is Active" not in m.columns:
         m["Is Active"] = "Checked"
     return m.drop_duplicates("Item Barcode").reset_index(drop=True)
@@ -298,6 +305,90 @@ def load_negatives(raw: bytes, sheet=0, header_row=None, mapping=None) -> pd.Dat
     return d
 
 
+
+# ==================== barcode variants ====================
+# iTrade holds the same product under 070177178017 and 70177178017, and the
+# POS accepts both. Stripping zeros blindly is not safe though: in this
+# masterlist 01234 is a tailoring charge and 1234 is a ball needle. So a
+# variant is only accepted when it resolves to exactly one item.
+
+def bc_variants(code):
+    """The forms a barcode might be stored under, most specific first."""
+    c = str(code).strip()
+    if not c:
+        return []
+    out = [c]
+    bare = c.lstrip("0")
+    if bare and bare != c:
+        out.append(bare)
+    for width in (12, 13, 14):
+        if len(bare) < width:
+            padded = bare.zfill(width)
+            if padded != c:
+                out.append(padded)
+    return list(dict.fromkeys(out))
+
+
+def resolve_bc(code, index):
+    """Find code in index, trying zero variants. Returns (found, note).
+    A variant that matches more than one item is refused."""
+    c = str(code).strip()
+    if c in index:
+        return c, ""
+    hits = [v for v in bc_variants(c)[1:] if v in index]
+    if len(hits) == 1:
+        return hits[0], f"matched {hits[0]} (leading zeros differ)"
+    if len(hits) > 1:
+        return None, f"ambiguous: {', '.join(hits)}"
+    return None, ""
+
+
+@st.cache_data(show_spinner=False)
+def duplicate_barcodes(master: pd.DataFrame) -> pd.DataFrame:
+    """Items held twice under zero-variant barcodes. Same product duplicated
+    is itself a cause of negative stock — sales hit one code, receipts the
+    other."""
+    m = master[["Item Barcode", "Item Name", "stock", "cost"]].copy()
+    m["canon"] = m["Item Barcode"].astype(str).str.strip().str.lstrip("0")
+    m = m[m["canon"] != ""]
+    grp = m.groupby("canon").filter(lambda g: g["Item Barcode"].nunique() > 1)
+    if not len(grp):
+        return pd.DataFrame()
+    rows = []
+    for canon, g in grp.groupby("canon"):
+        names = g["Item Name"].astype(str).str.upper().str.replace(
+            r"[^A-Z0-9]", "", regex=True)
+        a = set(names.iloc[0])
+        overlap = min(
+            len(a & set(n)) / max(len(a | set(n)), 1) for n in names[1:])
+        rows.append({
+            "Canonical": canon,
+            "Barcodes": " / ".join(g["Item Barcode"].astype(str)),
+            "Items": " / ".join(g["Item Name"].astype(str)),
+            "Stock": " / ".join(f"{v:g}" for v in g["stock"]),
+            "Total stock": float(g["stock"].sum()),
+            "Likely same product": overlap > 0.7,
+        })
+    return pd.DataFrame(rows).sort_values("Likely same product",
+                                          ascending=False)
+
+
+
+def cost_drift(derived, code, own_pair):
+    """How far the derived single cost sits from the item's own cost.
+
+    An item carries two: last purchase cost and weighted average. A break
+    sets the WAC, a purchase sets the last cost, so either can legitimately
+    match. Measure against the closer of the two — checking only one rejects
+    correct pairs (TWININGS 20S: 0% against WAC, 25.6% against last cost)."""
+    if not derived:
+        return None
+    costs = [c for c in own_pair.get(code, ()) if c and c > 0]
+    if not costs:
+        return None
+    return round(min(((derived - c) / c * 100 for c in costs), key=abs), 1)
+
+
 # ==================== matching ====================
 SIZE_JOIN_SIZE = re.compile(
     r"\d+(?:\.\d+)?\s?(?:GM|G|KG|ML|LTR|L)\s*(?:[+&]|PLUS|WITH|AND)\s*"
@@ -348,6 +439,7 @@ def find_breaks(m: pd.DataFrame, d: pd.DataFrame, threshold: float,
         mm["Item Name"].map(mult_of).tolist(), index=mm.index
     )
     own_cost = dict(zip(mm["Item Barcode"], mm["cost"]))
+    own_pair = dict(zip(mm["Item Barcode"], zip(mm["last_cost"], mm["wac"])))
     par = mm[(mm["stock"] > 0) & mm["isml"] & (mm["mult"] > 1)]
     P, inv = [], defaultdict(list)
     for r in par[["Item Barcode", "Item Name", "stock", "mult", "cost"]].to_dict("records"):
@@ -392,10 +484,8 @@ def find_breaks(m: pd.DataFrame, d: pd.DataFrame, threshold: float,
                 covered=need <= best[2], score=round(bs, 2), kind="Bundle break",
                 own_cost=own_cost.get(r["bc"], 0.0),
                 derived_cost=round(best[6] / best[3], COST_DP),
-                cost_drift_pct=(
-                    round((best[6] / best[3] - own_cost.get(r["bc"], 0)) /
-                          own_cost[r["bc"]] * 100, 1)
-                    if own_cost.get(r["bc"]) else None),
+                cost_drift_pct=cost_drift(best[6] / best[3], r["bc"],
+                                          own_pair),
             ))
     return pd.DataFrame(out), pd.DataFrame(combos)
 
@@ -407,6 +497,7 @@ def find_swaps(m: pd.DataFrame, d: pd.DataFrame, lo: float, hi: float,
     mm["isml"] = mm["Item Name"].astype(str).str.upper().map(
         lambda x: bool(MULT.search(x)))
     own_cost = dict(zip(mm["Item Barcode"], mm["cost"]))
+    own_pair = dict(zip(mm["Item Barcode"], zip(mm["last_cost"], mm["wac"])))
     pos = mm[(mm["stock"] > 0) & (~mm["isml"])]
     P, inv = [], defaultdict(list)
     for r in pos[["Item Barcode", "Item Name", "stock", "mrp", "cost"]].to_dict("records"):
@@ -451,10 +542,7 @@ def find_swaps(m: pd.DataFrame, d: pd.DataFrame, lo: float, hi: float,
                 score=round(bs, 2), kind="Wrong sale",
                 own_cost=own_cost.get(r["bc"], 0.0),
                 derived_cost=round(best[6], COST_DP),
-                cost_drift_pct=(
-                    round((best[6] - own_cost.get(r["bc"], 0)) /
-                          own_cost[r["bc"]] * 100, 1)
-                    if own_cost.get(r["bc"]) else None),
+                cost_drift_pct=cost_drift(best[6], r["bc"], own_pair),
             ))
     return pd.DataFrame(out)
 
@@ -751,6 +839,149 @@ def make_verification_book(cand: pd.DataFrame) -> bytes:
     buf = io.BytesIO(); wb.save(buf); return buf.getvalue()
 
 
+
+# ---- printable check sheet -------------------------------------------
+# The full verification workbook has 18 columns and will not print. This is
+# the paper version: nine narrow columns, A4 landscape, headings repeated on
+# every page, one section per sheet.
+PRINT_COLS = [
+    ("OUTER BARCODE", 16), ("OUTER DESCRIPTION", 38),
+    ("OUTER STOCK", 10), ("OUTER PRICE", 10),
+    ("SINGLE BARCODE", 16), ("ITEM NAME", 38),
+    ("NEGATIVE STOCK", 11),
+    ("BREAK\n(outers)", 10), ("CONV\n(per outer)", 10),
+    ("NEW QTY\n(singles)", 11), ("CONV. PRICE\n(per single)", 12),
+    ("MOVES\n(AED)", 11), ("CLEARS\n(AED)", 11),
+]
+
+
+def make_print_sheet(cand: pd.DataFrame, date_str="", prepared="") -> bytes:
+    """A4 landscape, one sheet per section, with the arithmetic spelled out
+    so nobody has to work out what BREAK and CONV mean."""
+    wb = Workbook()
+    wb.remove(wb.active)
+    for section, grp in cand.groupby("category", sort=True):
+        ws = wb.create_sheet(str(section)[:28] or "OTHER")
+        last = get_column_letter(len(PRINT_COLS))
+        for i, (h, w) in enumerate(PRINT_COLS, start=1):
+            ws.column_dimensions[get_column_letter(i)].width = w
+
+        ws.merge_cells(f"A1:{last}1")
+        ws["A1"] = f"STOCK CHECK — {section}"
+        ws["A1"].font = Font(size=13, bold=True)
+        ws["A1"].alignment = CENTER
+
+        ws.merge_cells(f"A2:{last}2")
+        ws["A2"] = ("Break BREAK outers  ×  CONV each  =  NEW QTY singles, "
+                    "clearing the NEGATIVE STOCK. Single cost becomes CONV. "
+                    "PRICE.    MOVES = value the adjustment shifts;  CLEARS = "
+                    "negative value it removes. They differ when the single's "
+                    "own cost is higher than the outer's.")
+        ws["A2"].font = Font(size=9, italic=True)
+        ws["A2"].alignment = Alignment("center")
+
+        ws.merge_cells(f"A3:{last}3")
+        ws["A3"] = (f"Date: {date_str}      Prepared by: {prepared}"
+                    f"      Checked by: ____________________")
+        ws["A3"].font = Font(size=9)
+
+        for c, (h, _) in enumerate(PRINT_COLS, start=1):
+            cell = ws.cell(row=4, column=c, value=h)
+            cell.fill = GREY
+            cell.font = Font(bold=True, size=9)
+            cell.alignment = Alignment("center", "center", wrap_text=True)
+            cell.border = BOX
+        ws.row_dimensions[4].height = 30
+
+        r = 5
+        for rec in grp.sort_values("neg_val").to_dict("records"):
+            conv = rec.get("conv", 1) or 1
+            cost = rec.get("par_cost", 0) or 0
+            outers = rec.get("outers_needed", 0) or 0
+            vals = [str(rec.get("par_bc", "")), rec.get("par_desc", ""),
+                    rec.get("par_stock", ""), cost,
+                    str(rec.get("neg_bc", "")), rec.get("neg_desc", ""),
+                    rec.get("neg_qty", 0),
+                    outers, conv, round(abs(outers) * conv, 3),
+                    round(cost / conv, 7) if conv else 0,
+                    round(abs(outers) * cost, 2),
+                    round(abs(rec.get("neg_val", 0) or 0), 2)]
+            for c, v in enumerate(vals, start=1):
+                cell = ws.cell(row=r, column=c, value=v)
+                cell.border = BOX
+                cell.font = Font(size=9)
+                if c in (1, 5):
+                    cell.number_format = "@"
+                    cell.alignment = Alignment("center")
+                elif c in (3, 7, 8, 9, 10):
+                    cell.alignment = Alignment("center")
+                elif c in (4, 11):
+                    cell.number_format = "0.00####"
+                    cell.alignment = Alignment("right")
+                elif c in (12, 13):
+                    cell.number_format = "#,##0.00"
+                    cell.alignment = Alignment("right")
+                if c in (8, 9, 10):
+                    cell.fill = PatternFill("solid", fgColor="EFEFEF")
+            ws.row_dimensions[r].height = 16
+            r += 1
+
+        val = float(grp["neg_val"].abs().sum())
+        moves = float(sum((g.get("outers_needed", 0) or 0)
+                          * (g.get("par_cost", 0) or 0)
+                          for g in grp.to_dict("records")))
+        ws.cell(row=r, column=11, value="SHEET TOTAL").font = Font(
+            bold=True, size=10)
+        ws.cell(row=r, column=11).alignment = Alignment("right")
+        for col, amount in ((12, moves), (13, val)):
+            t = ws.cell(row=r, column=col, value=round(amount, 2))
+            t.font = Font(bold=True, size=10)
+            t.fill = GREY
+            t.number_format = "#,##0.00"
+            t.alignment = Alignment("right")
+        ws.cell(row=r, column=1,
+                value=f"{len(grp)} lines").font = Font(size=9, bold=True)
+        for c in range(1, len(PRINT_COLS) + 1):
+            ws.cell(row=r, column=c).border = BOX
+
+        ws.cell(row=r + 2, column=1,
+                value="Signature: ______________________").font = Font(size=9)
+
+        ws.freeze_panes = "A5"
+        ws.print_area = f"A1:{last}{r + 2}"
+        ws.print_title_rows = "1:4"
+        ws.page_setup.orientation = "landscape"
+        ws.page_setup.paperSize = ws.PAPERSIZE_A4
+        ws.page_setup.fitToWidth = 1
+        ws.page_setup.fitToHeight = 0
+        ws.sheet_properties.pageSetUpPr.fitToPage = True
+        ws.page_margins.left = ws.page_margins.right = 0.25
+        ws.page_margins.top = ws.page_margins.bottom = 0.35
+
+    return _wb_bytes(wb)
+
+
+def _wb_bytes(wb):
+    buf = io.BytesIO()
+    wb.save(buf)
+    return buf.getvalue()
+
+
+def parse_serials(text, biggest):
+    """'1,3,5-9 12' -> {1,3,5,6,7,8,9,12}. Ignores anything out of range."""
+    out = set()
+    for chunk in re.split(r"[,\s]+", str(text or "").strip()):
+        if not chunk:
+            continue
+        m = re.fullmatch(r"(\d+)\s*[-–]\s*(\d+)", chunk)
+        if m:
+            a, b = int(m.group(1)), int(m.group(2))
+            out.update(range(min(a, b), max(a, b) + 1))
+        elif chunk.isdigit():
+            out.add(int(chunk))
+    return {n for n in out if 1 <= n <= biggest}
+
+
 def read_verification(raw: bytes) -> pd.DataFrame:
     """Read back every sheet, keep the rows marked Y."""
     book = pd.read_excel(io.BytesIO(raw), sheet_name=None, header=2, dtype=str)
@@ -916,8 +1147,10 @@ if neg is not None and master is not None:
     if blank.any():
         lookup = dict(zip(master["Item Barcode"].astype(str).str.strip(),
                           master["Item Name"].astype(str)))
-        neg.loc[blank, "Item Name"] = (neg.loc[blank, "bc"].map(lookup)
-                                       .fillna(""))
+        def _name(code):
+            hit, _ = resolve_bc(code, lookup)
+            return lookup.get(hit, "") if hit else ""
+        neg.loc[blank, "Item Name"] = neg.loc[blank, "bc"].map(_name)
         still = neg["Item Name"].astype(str).str.strip().eq("")
         neg.loc[still, "Item Name"] = "(not in masterlist) " + neg.loc[still, "bc"]
         st.caption(f"{int(blank.sum())} rows had no description in the export — "
@@ -972,7 +1205,9 @@ tab1, tab2, tabV, tab3, tab4, tabA = st.tabs(
 with tab1:
     total = float(neg["val"].sum())
     units = float(neg["qty"].sum())
-    in_master = neg["bc"].isin(set(master["Item Barcode"]))
+    _mcodes = set(master["Item Barcode"].astype(str).str.strip())
+    in_master = neg["bc"].map(
+        lambda c: resolve_bc(c, _mcodes)[0] is not None)
 
     c1, c2, c3, c4 = st.columns(4)
     c1.markdown(stat_card("Negative lines", f"{len(neg):,}",
@@ -1348,7 +1583,27 @@ with tab1:
     if len(miss):
         with st.expander(f"Not in the masterlist — {len(miss)} dead codes  ·  "
                          f"{money(miss['val'].sum())}"):
+            st.caption("Leading-zero variants are already resolved, so these "
+                       "genuinely do not exist under any form of the code.")
             item_table(miss, key="dead")
+
+    dups = duplicate_barcodes(master)
+    if len(dups):
+        same = int(dups["Likely same product"].sum())
+        with st.expander(f"One product under two barcodes — {len(dups)} pair(s), "
+                         f"{same} look like the same item"):
+            st.caption("The same product held under 0806149321941 and "
+                       "806149321941 will take sales on one code and receipts "
+                       "on the other, which drives one of them negative on its "
+                       "own. Worth merging in the item master.")
+            st.dataframe(dups, use_container_width=True, hide_index=True,
+                         column_config={
+                             "Barcodes": st.column_config.TextColumn(
+                                 width="medium"),
+                             "Items": st.column_config.TextColumn(
+                                 width="large"),
+                             "Likely same product":
+                                 st.column_config.CheckboxColumn()})
 
 
 # ---------- Candidates ----------
@@ -1406,12 +1661,17 @@ def candidates_tab(neg, master, master_idx, neg_map,
             probs = [validate(r, master_idx, neg_map, drift_tol)
                      for r in cand.to_dict("records")]
             cand["problems"] = ["; ".join(p) for p in probs]
-            # over/under-clear is normal odd-quantity overshoot, not a fault
-            cand["blocked"] = [
-                any(not (x.startswith("over-clears") or x.startswith("under-clears"))
-                    for x in p) for p in probs]
-            clean = ~cand["blocked"]
-            cand["use"] = clean          # everything usable; filter by value below
+            # A pair either survives the checks or it is dropped here. Nothing
+            # downstream re-decides, so every screen shows the same list.
+            # Over/under-clear is normal odd-quantity overshoot, not a fault.
+            fatal = [[x for x in p
+                      if not (x.startswith("over-clears")
+                              or x.startswith("under-clears"))] for p in probs]
+            dropped = cand[[bool(f) for f in fatal]].copy()
+            dropped["why"] = ["; ".join(f) for f in fatal if f]
+            cand = cand[[not f for f in fatal]].reset_index(drop=True)
+            cand["use"] = True
+            st.session_state["dropped"] = dropped
             st.session_state["cand"] = cand
             st.session_state["combos"] = combos
             st.session_state["batch"] = 0
@@ -1446,15 +1706,14 @@ def candidates_tab(neg, master, master_idx, neg_map,
             st.dataframe(combos, use_container_width=True, hide_index=True)
 
     if cand is not None and len(cand):
-        clean_mask = (~cand["blocked"] if "blocked" in cand.columns
-                      else cand["problems"].eq(""))
         m1, m2, m3, m4 = st.columns(4)
         m1.metric("Candidates", len(cand))
         m2.metric("Value covered", f"{cand['neg_val'].sum():,.0f} AED")
-        m3.metric("No blockers", int(clean_mask.sum()))
+        m3.metric("Dropped by checks",
+                  len(st.session_state.get("dropped", [])))
         m4.metric("Ticked", int(cand["use"].sum()))
 
-        vals = cand.loc[clean_mask, "neg_val"].abs()
+        vals = cand["neg_val"].abs()
         vmax = float(vals.max()) if len(vals) else 0.0
 
         # Selection is computed from these controls every run — no widget holds
@@ -1463,14 +1722,10 @@ def candidates_tab(neg, master, master_idx, neg_map,
         thresh = q1.number_input(
             "Only take pairs worth at least (AED)", min_value=0.0,
             max_value=max(vmax, 1.0), value=0.0, step=5.0, key="thresh",
-            help="0 takes every unblocked pair. Raise it to skip the small ones.")
-        include_blocked = q2.checkbox(
-            "Include pairs with blockers", False, key="incl_blocked",
-            help="Cost drift, short source stock, missing barcode. "
-                 "Only tick this if you have checked them yourself.")
-
-        base = cand if include_blocked else cand[clean_mask]
-        eligible = base[base["neg_val"].abs() >= thresh]
+            help="0 takes every pair. Raise it to skip the small ones.")
+        q2.caption("Pairs that failed the cost, stock or barcode checks were "
+                   "dropped when matching ran — they are not in this list.")
+        eligible = cand[cand["neg_val"].abs() >= thresh]
 
         cand["use"] = cand.index.isin(eligible.index)
         st.session_state["cand"] = cand
@@ -1486,7 +1741,7 @@ def candidates_tab(neg, master, master_idx, neg_map,
         BASIC = ["neg_desc", "neg_qty", "neg_val", "par_desc", "conv",
                  "outers_needed", "cost_drift_pct", "problems"]
         extra_opts = [c for c in cand.columns
-                      if c not in BASIC + ["use", "blocked"]]
+                      if c not in BASIC + ["use"]]
         show_extra = st.multiselect("Add columns", extra_opts, default=[],
                                     key="extra_cols")
         cols = [c for c in BASIC if c in cand.columns] + show_extra
@@ -1537,72 +1792,158 @@ def candidates_tab(neg, master, master_idx, neg_map,
 
 # ---------- Verify ----------
 with tabV:
-    st.caption("The app keeps nothing after you close it. This sheet is the record — "
-               "export it, let the section staff check the shelf, upload it back.")
     cand = st.session_state.get("cand")
-
-    st.subheader("1. Export for the sections")
     if cand is None or not len(cand):
         st.info("Run matching first.")
     else:
-        st.write(f"{len(cand)} pairs across "
-                 f"{cand['category'].nunique()} sections, numbered serially, "
-                 f"one sheet per section.")
-        st.download_button(
-            "⬇ Download verification sheet",
-            make_verification_book(cand),
-            f"VERIFICATION_{adj_date.replace('-', '')}.xlsx",
-            "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
-            use_container_width=True)
+        cand = cand.copy()
+        cand["serial"] = range(1, len(cand) + 1)
+        st.session_state["cand"] = cand
 
-    st.divider()
-    st.subheader("2. Upload it back once signed off")
-    up = st.file_uploader("Verified sheet", type=["xlsx"], key="verified_up")
-    if up is not None:
-        try:
-            v = read_verification(up.getvalue())
-        except Exception as e:
-            st.error(f"Could not read it: {e}")
-            v = None
-        if v is not None:
-            yes = int(v["_verified"].sum())
-            c1, c2, c3 = st.columns(3)
-            c1.metric("Rows in sheet", len(v))
-            c2.metric("Verified Y", yes)
-            c3.metric("Rejected / blank", len(v) - yes)
-            st.session_state["verified"] = v
-            if cand is not None and len(cand):
-                cand = cand.copy()
-                cand["KEY"] = [pair_key(r) for r in cand.to_dict("records")]
-                ok = set(v.loc[v["_verified"], "KEY"])
-                order = dict(zip(v["KEY"], v["ROW"]))
-                cand["use"] = cand["KEY"].isin(ok)
-                cand["serial"] = cand["KEY"].map(order)
-                cand = cand.sort_values("serial", na_position="last")
-                st.session_state["cand"] = cand
-                st.session_state["batch"] = 0
-                st.success(f"{int(cand['use'].sum())} pairs ticked and put in "
-                           f"serial order. Go to Build sheets.")
+        st.subheader("1. Print a check sheet")
+
+        # The paper must match what Build sheets will actually use, or the
+        # counts disagree and nobody knows which list is real.
+        printable = cand[cand["use"]].copy() if "use" in cand.columns \
+            else cand.copy()
+        if not len(printable):
+            st.warning("Nothing selected. Widen the value filter on the "
+                       "Candidates tab.")
+            st.stop()
+
+        by_sec = (printable.groupby("category")
+                  .agg(Lines=("neg_val", "size"),
+                       Clears=("neg_val", lambda x: x.abs().sum()))
+                  .reset_index().sort_values("Clears", ascending=False))
+        st.caption(f"{len(printable)} pair(s) across "
+                   f"{printable['category'].nunique()} section(s). A4 "
+                   f"landscape, one sheet per section, headings repeat on "
+                   f"every page.")
+        v1, v2 = st.columns([1, 2])
+        v1.markdown(stat_card("These sheets clear",
+                              money_html(-printable["neg_val"].abs().sum(), 2),
+                              f"{len(printable)} pairs"),
+                    unsafe_allow_html=True)
+        v2.dataframe(by_sec.rename(columns={"category": "Section"}),
+                     use_container_width=True, hide_index=True,
+                     column_config={"Clears": st.column_config.NumberColumn(
+                         "Clears", format="AED %.2f")})
+
+        dropped = st.session_state.get("dropped")
+        if dropped is not None and len(dropped):
+            with st.expander(f"{len(dropped)} pair(s) dropped when matching "
+                             f"ran — not on this sheet"):
                 st.dataframe(
-                    cand.loc[cand["use"],
-                             ["serial", "neg_desc", "neg_qty", "par_desc",
-                              "conv", "outers_needed"]],
-                    use_container_width=True, hide_index=True)
-            else:
-                st.warning("Run matching first so the verified rows can be matched "
-                           "back to candidates.")
+                    dropped[["neg_bc", "neg_desc", "neg_val", "par_desc",
+                             "why"]].rename(columns={
+                                 "neg_bc": "Barcode", "neg_desc": "Item",
+                                 "neg_val": "Value", "par_desc": "Outer",
+                                 "why": "Reason"}),
+                    use_container_width=True, hide_index=True,
+                    column_config={"Barcode": st.column_config.TextColumn()})
+                st.caption("Loosen the drift tolerance on Candidates if you "
+                           "believe a pairing is right despite the cost gap.")
 
-    st.divider()
-    st.subheader("Where the tracking lives")
-    st.markdown(
-        "- The **verification sheet** is the saved state. It carries a hidden KEY "
-        "column — do not delete it or the upload cannot match rows back.\n"
-        "- Keep each dated sheet in a shared folder. That folder is your audit "
-        "trail: who verified what, on which day, with shelf quantities and remarks.\n"
-        "- Nothing is stored on the server. On Streamlit Cloud a database file "
-        "would be wiped whenever the app sleeps or redeploys, so a file you hold "
-        "is safer than one the app holds."
-    )
+        # everything printed is what Build will use, unless staff cut some
+        cand["use"] = cand.index.isin(printable.index)
+        st.session_state["cand"] = cand
+        st.session_state["batch"] = 0
+        st.write("")
+
+        p1, p2 = st.columns(2)
+        p1.download_button(
+            "⬇ Check sheet for printing",
+            make_print_sheet(printable, adj_date, prepared),
+            f"CHECK_{adj_date.replace('-', '')}.xlsx", XLSX_MIME,
+            use_container_width=True, type="primary")
+        p2.download_button(
+            "⬇ Full workbook (every column)",
+            make_verification_book(printable),
+            f"VERIFICATION_{adj_date.replace('-', '')}.xlsx", XLSX_MIME,
+            use_container_width=True)
+        st.caption(f"Build sheets is now set to these {len(printable)} pair(s). "
+                   f"If staff reject some, enter only the ones that passed "
+                   f"below and it narrows to those.")
+
+        st.divider()
+        st.subheader("2. Enter what came back")
+        st.caption("The sheet has no row numbers, so identify rows by their "
+                   "SINGLE barcode. Paste or scan them — one per line, or "
+                   "separated by commas or spaces.")
+        t1, t2 = st.columns([3, 1])
+        typed = t1.text_area("Single barcodes that passed", "", height=110,
+                             key="passed_codes")
+        t2.write("")
+        if t2.button("All of them", use_container_width=True):
+            st.session_state["passed_codes"] = "\n".join(
+                cand["neg_bc"].astype(str))
+            st.rerun()
+        if t2.button("Clear", use_container_width=True):
+            st.session_state["passed_codes"] = ""
+            st.rerun()
+
+        given = [c.strip() for c in re.split(r"[\s,;]+", typed or "")
+                 if c.strip()]
+        known = set(cand["neg_bc"].astype(str))
+        picked, unknown, fuzzy = set(), set(), []
+        for c in given:
+            hit, note = resolve_bc(c, known)
+            if hit:
+                picked.add(hit)
+                if note:
+                    fuzzy.append(f"{c} → {hit}")
+            else:
+                unknown.add(c)
+        if fuzzy:
+            st.caption("Matched despite different leading zeros: "
+                       + "; ".join(fuzzy[:6])
+                       + (" …" if len(fuzzy) > 6 else ""))
+        if unknown:
+            st.warning(f"{len(unknown)} barcode(s) are not on this list — "
+                       f"ignored: {', '.join(sorted(unknown)[:8])}"
+                       + (" …" if len(unknown) > 8 else ""))
+
+        if picked:
+            cand["use"] = cand["neg_bc"].astype(str).isin(picked)
+            st.session_state["cand"] = cand
+            st.session_state["batch"] = 0
+            sel = cand[cand["use"]]
+            c1, c2, c3 = st.columns(3)
+            c1.metric("Passed", len(sel))
+            c2.metric("Left out", len(cand) - len(sel))
+            c3.metric("Value covered", money(sel["neg_val"].sum(), 0))
+            st.success("Go to Build sheets — these are the pairs it will use.")
+            st.dataframe(
+                sel[["neg_bc", "neg_desc", "neg_qty", "par_bc", "par_desc",
+                     "outers_needed", "conv"]].rename(columns={
+                         "neg_bc": "Single barcode", "neg_desc": "Item name",
+                         "neg_qty": "Negative stock",
+                         "par_bc": "Outer barcode", "par_desc": "Outer",
+                         "outers_needed": "Breaking", "conv": "Conv"}),
+                use_container_width=True, hide_index=True, height=320,
+                column_config={
+                    "Single barcode": st.column_config.TextColumn(),
+                    "Outer barcode": st.column_config.TextColumn()})
+
+        with st.expander("Or upload the full workbook back instead"):
+            st.caption("Only if staff filled the Y/N column in Excel rather "
+                       "than on paper. Do not delete the hidden KEY column.")
+            up = st.file_uploader("Verified workbook", type=["xlsx"],
+                                  key="verified_up")
+            if up is not None:
+                try:
+                    v = read_verification(up.getvalue())
+                except Exception as e:
+                    st.error(f"Could not read it: {e}")
+                    v = None
+                if v is not None:
+                    cand["KEY"] = [pair_key(r) for r in cand.to_dict("records")]
+                    ok = set(v.loc[v["_verified"], "KEY"])
+                    cand["use"] = cand["KEY"].isin(ok)
+                    st.session_state["cand"] = cand
+                    st.session_state["batch"] = 0
+                    st.success(f"{int(cand['use'].sum())} of {len(v)} rows "
+                               f"marked Y. Go to Build sheets.")
 
 # ---------- Build ----------
 @st.fragment
@@ -1615,12 +1956,20 @@ def build_tab(adj_date, prepared, checked, verified, txt_prefix, store):
     pool += manual
 
     if not pool:
-        st.info("Run matching first, or add a pair by hand.")
+        n_all = len(cand) if cand is not None else 0
+        if n_all:
+            st.warning(f"None of the {n_all} candidate(s) are selected. "
+                       f"Go to the Verify tab — it sets the list — or widen "
+                       f"the value filter on Candidates.")
+        else:
+            st.info("Run matching first, or add a pair by hand.")
     else:
         done = st.session_state.get("batch", 0)
         left = len(pool) - done
         c1, c2, c3 = st.columns(3)
-        c1.metric("Pairs selected", len(pool))
+        c1.metric("Pairs selected", len(pool),
+                  f"of {len(cand)} candidates" if cand is not None
+                  and len(cand) else None, delta_color="off")
         c2.metric("Already generated", done)
         c3.metric("Remaining", max(left, 0))
 
