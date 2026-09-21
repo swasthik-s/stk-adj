@@ -1046,43 +1046,73 @@ def get_store():
 # ==================== UI ====================
 st.title("📦 Negative Stock Adjustment Tool")
 
-# ---- controls in a row of dropdowns, not a sidebar -------------------
-b1, b2, b3, b4 = st.columns([2, 2, 2, 3])
+# ---- controls as three large tiles ------------------------------------
+def tile_head(icon, title, status, ok):
+    """Big icon, title, and a one-line status in green or grey."""
+    colour = "#2eb872" if ok else "#8b929c"
+    st.markdown(
+        f'<div style="display:flex;align-items:center;gap:.75rem;'
+        f'margin-bottom:.35rem">'
+        f'<div style="font-size:2rem;line-height:1">{icon}</div>'
+        f'<div><div style="font-size:1.15rem;font-weight:600">{title}</div>'
+        f'<div style="font-size:.82rem;color:{colour}">{status}</div>'
+        f'</div></div>', unsafe_allow_html=True)
 
-with b1.popover("📂 Data", use_container_width=True):
-    f_master = st.file_uploader("Masterlist (CSV)", type=["csv"])
+
+# read current values so each tile can show its state before it is opened
+_prev_date = st.session_state.get("adj_date", "11-09-26")
+_prev_prep = st.session_state.get("prepared", "SWASTHIK")
+_prev_thr = st.session_state.get("br_thresh", 0.80)
+_prev_drift = st.session_state.get("drift_tol", 15.0)
+_have_m = st.session_state.get("f_master") is not None
+_have_n = st.session_state.get("f_neg") is not None
+
+t1, t2, t3 = st.columns(3, gap="medium")
+
+with t1.container(border=True):
+    tile_head("📂", "Data",
+              "Both files loaded" if (_have_m and _have_n)
+              else "Masterlist and negative report needed",
+              _have_m and _have_n)
+    f_master = st.file_uploader("Masterlist (CSV)", type=["csv"],
+                                key="f_master")
     f_neg = st.file_uploader("Negative stock report (XLSX)",
-                             type=["xlsx", "xls"])
+                             type=["xlsx", "xls"], key="f_neg")
 
-with b2.popover("✍ Sheet details", use_container_width=True):
-    adj_date = st.text_input("Date", "11-09-26")
-    prepared = st.text_input("Prepared by", "SWASTHIK")
-    checked = st.text_input("Checked by", "IRSHAD")
-    verified = st.text_input("Verified by", "THALLATH")
-    txt_prefix = st.text_input("Import file prefix", "SML",
-                               help="First field of every line in the .txt")
+with t2.container(border=True):
+    tile_head("✍", "Sheet details",
+              f"{_prev_date}  ·  {_prev_prep}", True)
+    with st.popover("Edit", use_container_width=True):
+        adj_date = st.text_input("Date", "11-09-26", key="adj_date")
+        prepared = st.text_input("Prepared by", "SWASTHIK", key="prepared")
+        checked = st.text_input("Checked by", "IRSHAD", key="checked")
+        verified = st.text_input("Verified by", "THALLATH", key="verified")
+        txt_prefix = st.text_input("Import file prefix", "SML",
+                                   key="txt_prefix",
+                                   help="First field of every line in the .txt")
 
-with b3.popover("⚙ Matching", use_container_width=True):
-    br_thresh = st.slider("Bundle break strictness", 0.70, 1.00, 0.80, 0.01,
-                          help="Higher = fewer but safer matches")
-    sw_lo, sw_hi = st.slider("Wrong sale similarity window", 0.40, 1.00,
-                             (0.55, 0.95), 0.05,
-                             help="Similar but not identical")
-    price_tol = st.slider("Wrong sale price tolerance", 0.05, 0.60, 0.25, 0.05)
-    drift_tol = st.slider("Max cost drift %", 2.0, 60.0, 15.0, 1.0,
-                          help="A real break barely moves the item's cost. "
-                               "A big drift usually means the pair is wrong.")
-
-with b4:
-    if f_master and f_neg:
-        st.caption(f"📄 {f_master.name}  ·  {f_neg.name}"
-                   f"    |    {adj_date}  ·  {prepared}")
-    else:
-        st.caption("Open **Data** and load the two files to start.")
+with t3.container(border=True):
+    tile_head("⚙", "Matching",
+              f"Strictness {_prev_thr:.2f}  ·  drift ≤ {_prev_drift:.0f}%",
+              True)
+    with st.popover("Adjust", use_container_width=True):
+        br_thresh = st.slider("Bundle break strictness", 0.70, 1.00, 0.80,
+                              0.01, key="br_thresh",
+                              help="Higher = fewer but safer matches")
+        sw_lo, sw_hi = st.slider("Wrong sale similarity window", 0.40, 1.00,
+                                 (0.55, 0.95), 0.05, key="sw_window",
+                                 help="Similar but not identical")
+        price_tol = st.slider("Wrong sale price tolerance", 0.05, 0.60, 0.25,
+                              0.05, key="price_tol")
+        drift_tol = st.slider("Max cost drift %", 2.0, 60.0, 15.0, 1.0,
+                              key="drift_tol",
+                              help="A real break barely moves the item's "
+                                   "cost. A big drift usually means the pair "
+                                   "is wrong.")
+st.write("")
 
 if not (f_master and f_neg):
-    st.info("Open **📂 Data** above and upload the masterlist and the "
-            "negative stock report.")
+    st.info("Drop the two files into the **📂 Data** tile to start.")
     st.stop()
 
 try:
