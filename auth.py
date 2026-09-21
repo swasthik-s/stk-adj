@@ -46,7 +46,7 @@ def require_pin(title="Al Madina stock tools"):
                                 label_visibility="collapsed",
                                 placeholder="PIN")
         ok = st.form_submit_button("Enter", type="primary",
-                                   use_container_width=True)
+                                   width="stretch")
 
     if ok:
         # hmac.compare_digest avoids leaking the answer through timing.
@@ -67,6 +67,6 @@ def require_pin(title="Al Madina stock tools"):
 def sign_out_button(target=None):
     """Optional. Drop it anywhere you want a way out."""
     t = target or st
-    if t.button("Sign out", use_container_width=True):
+    if t.button("Sign out", width="stretch"):
         st.session_state["authed"] = False
         st.rerun()
