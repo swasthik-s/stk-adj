@@ -11,8 +11,8 @@ secondaryBackgroundColor = "#171B24" # cards, sidebar, table header
 textColor = "#E6E8EB"
 linkColor = "#7AA2F7"
 
-font = "sans-serif"
-headingFont = "sans-serif"
+font = "Varela Round:https://fonts.googleapis.com/css2?family=Varela+Round&display=swap, sans-serif"
+headingFont = "Varela Round:https://fonts.googleapis.com/css2?family=Varela+Round&display=swap, sans-serif"
 codeFont = "monospace"
 
 baseRadius = "0.5rem"
