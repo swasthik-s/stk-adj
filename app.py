@@ -31,6 +31,7 @@ HERE = Path(__file__).parent
 PAGES = [
     ("pages/negative_stock.py", "Negative stock", "📦", True),
     ("pages/pdf_tools.py", "PDF to Excel / txt", "📄", False),
+    ("pages/history.py", "History", "🕘", False),
 ]
 
 found, missing = [], []
