@@ -49,7 +49,7 @@ OCR_OK = OCR_ENGINE is not None
 def _rapid():
     return RapidOCR()
 
-st.title("📄 PDF → Excel / txt")
+st.title(":material/picture_as_pdf: PDF → Excel / txt")
 
 if not PDF_OK:
     st.error(f"pdfplumber is not installed on the server. {PDF_ERR}")
