@@ -14,7 +14,7 @@ from pathlib import Path
 import pandas as pd
 import streamlit as st
 
-st.title("🕘 History")
+st.title(":material/history: History")
 
 # ---------------------------------------------------------------- store
 try:
@@ -179,16 +179,16 @@ else:
                    "Negative stock page produced at the time.")
         d1, d2, d3 = st.columns(3)
         d1.download_button(
-            "⬇ Check sheet", B["make_print_sheet"](use, date, prep),
+            ":material/download: Check sheet", B["make_print_sheet"](use, date, prep),
             f"CHECK_{stamp}.xlsx", XL, width="stretch",
             type="primary")
         d2.download_button(
-            f"⬇ Adjustments ({len(chunks)} sheets)",
+            f":material/download: Adjustments ({len(chunks)} sheets)",
             B["build_workbook"](chunks, "OUTER BREAK FOR NEGATIVE STOCK",
                                 date, prep, "IRSHAD", "THALLATH"),
             f"ADJUSTMENTS_{stamp}.xlsx", XL, width="stretch")
         txt = "".join(B["make_txt"](c, "SML")[0].decode() for c in chunks)
-        d3.download_button("⬇ iTrade import", txt.encode(),
+        d3.download_button(":material/download: iTrade import", txt.encode(),
                            f"ADJUSTMENTS_{stamp}.txt", "text/plain",
                            width="stretch")
 
