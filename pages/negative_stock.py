@@ -1067,7 +1067,7 @@ _prev_drift = st.session_state.get("drift_tol", 15.0)
 _have_m = st.session_state.get("f_master") is not None
 _have_n = st.session_state.get("f_neg") is not None
 
-t1, t2, t3 = st.columns(3, gap="medium")
+t1, t2, t3, t4 = st.columns([3, 3, 3, 2], gap="medium")
 
 with t1.container(border=True):
     tile_head("📂", "Data",
@@ -1082,7 +1082,7 @@ with t1.container(border=True):
 with t2.container(border=True):
     tile_head("✍", "Sheet details",
               f"{_prev_date}  ·  {_prev_prep}", True)
-    with st.popover("Edit", use_container_width=True):
+    with st.popover("Edit", width="stretch"):
         adj_date = st.text_input("Date", "11-09-26", key="adj_date")
         prepared = st.text_input("Prepared by", "SWASTHIK", key="prepared")
         checked = st.text_input("Checked by", "IRSHAD", key="checked")
@@ -1095,7 +1095,7 @@ with t3.container(border=True):
     tile_head("⚙", "Matching",
               f"Strictness {_prev_thr:.2f}  ·  drift ≤ {_prev_drift:.0f}%",
               True)
-    with st.popover("Adjust", use_container_width=True):
+    with st.popover("Adjust", width="stretch"):
         br_thresh = st.slider("Bundle break strictness", 0.70, 1.00, 0.80,
                               0.01, key="br_thresh",
                               help="Higher = fewer but safer matches")
@@ -1110,6 +1110,14 @@ with t3.container(border=True):
                                    "cost. A big drift usually means the pair "
                                    "is wrong.")
 st.write("")
+
+with t4.container(border=True):
+    _sid = st.session_state.get("session_id")
+    tile_head("💾", "Session",
+              "Saved" if _sid else "Not saved yet", bool(_sid))
+    _save_clicked = st.button("Save now", width="stretch",
+                              type="primary", key="save_session_btn",
+                              disabled=not (f_master and f_neg))
 
 if not (f_master and f_neg):
     st.info("Drop the two files into the **📂 Data** tile to start.")
@@ -1133,7 +1141,7 @@ try:
 except Exception as err:
     st.warning("I could not read this export automatically — map the columns below.")
     with st.expander("First 15 rows of the file", expanded=True):
-        st.dataframe(grid.head(15), use_container_width=True)
+        st.dataframe(grid.head(15), width="stretch")
     hr = st.number_input(
         "Which row holds the column headings? (row 1 is the first row)",
         min_value=1, max_value=40,
@@ -1235,10 +1243,45 @@ if store is not None and neg is not None:
                 st.session_state["snap_sig"] = sig
                 if okS:
                     st.session_state["snapshot_id"] = sid
+                # new data loaded -> new session, saved automatically
+                if hasattr(store, "save_session"):
+                    okX, xid = store.save_session(
+                        neg_df=neg,
+                        source={"negative_file": getattr(f_neg, "name", ""),
+                                "master_file": getattr(f_master, "name", "")},
+                        settings={"break_threshold": br_thresh,
+                                  "drift_tol": drift_tol,
+                                  "price_tol": price_tol},
+                        note="auto")
+                    if okX:
+                        st.session_state["session_id"] = xid
+                        st.session_state["session_saved_at"] = "auto"
         except Exception as e:
             st.session_state["snap_warn"] = (
                 f"Snapshot not saved ({type(e).__name__}). "
                 f"Everything else is unaffected.")
+
+if _save_clicked:
+    if store is None or not hasattr(store, "save_session"):
+        st.error("Saving needs the database — see the Archive tab.")
+    else:
+        _cand = st.session_state.get("cand")
+        _settings = {"break_threshold": br_thresh, "drift_tol": drift_tol,
+                     "price_tol": price_tol, "date": adj_date,
+                     "prepared": prepared}
+        if st.session_state.get("session_id"):
+            ok_, _ = store.update_session(st.session_state["session_id"],
+                                          cand_df=_cand, settings=_settings,
+                                          note="saved")
+        else:
+            ok_, sid_ = store.save_session(
+                neg_df=neg, cand_df=_cand, settings=_settings, note="saved",
+                source={"negative_file": getattr(f_neg, "name", ""),
+                        "master_file": getattr(f_master, "name", "")})
+            if ok_:
+                st.session_state["session_id"] = sid_
+        (st.toast if hasattr(st, "toast") else st.success)(
+            "Session saved" if ok_ else "Save failed")
 
 tab1, tab2, tabV, tab3, tab4, tabA = st.tabs(
     ["Overview", "Candidates", "Verify", "Build sheets", "Manual pair", "Archive"]
@@ -1433,7 +1476,7 @@ with tab1:
                                alt.Tooltip("Share %:Q", format=".1f")])
               .properties(height=380))
 
-    st.altair_chart(ch.configure_view(strokeWidth=0), use_container_width=True)
+    st.altair_chart(ch.configure_view(strokeWidth=0), width="stretch")
     st.caption({"Linked": "Click any category on the left — the right panel "
                           "switches to its biggest items. Hover either side "
                           "for barcode, quantity and value.",
@@ -1448,7 +1491,7 @@ with tab1:
 
     st.dataframe(
         by_cat.rename(columns={"category": "Category"}),
-        use_container_width=True, hide_index=True,
+        width="stretch", hide_index=True,
         column_config={
             "Value": st.column_config.NumberColumn("Value", format="AED %.0f"),
             "Units": st.column_config.NumberColumn(format="%.0f"),
@@ -1497,7 +1540,7 @@ with tab1:
 
         st.altair_chart((pts + txt).properties(height=430)
                         .configure_view(strokeWidth=0),
-                        use_container_width=True)
+                        width="stretch")
         st.caption("Bubble size is the average per line. Top left is a few "
                    "lines holding a lot of money — worth doing by hand. "
                    "Bottom right is many small lines — bulk adjust.")
@@ -1533,10 +1576,10 @@ with tab1:
                                      format=",.2f"),
                          alt.Tooltip("% of value:Q", format=".1f")])
             .properties(height=260).configure_view(strokeWidth=0),
-            use_container_width=True)
+            width="stretch")
     with bc2:
         st.dataframe(bands_df.drop(columns="Negative"),
-                     use_container_width=True, hide_index=True,
+                     width="stretch", hide_index=True,
                      column_config={
                          "Value": st.column_config.NumberColumn(format="AED %.0f"),
                          "% of value": st.column_config.ProgressColumn(
@@ -1593,7 +1636,7 @@ with tab1:
         out = df.sort_values("val")[cols].rename(columns=names)
         st.dataframe(
             colour_money(out, ["Quantity", "Stock Value"]),
-            use_container_width=True, hide_index=True,
+            width="stretch", hide_index=True,
             column_config={
                 "ItemCode": st.column_config.TextColumn(width="medium"),
                 "Item Name": st.column_config.TextColumn(width="large"),
@@ -1639,7 +1682,7 @@ with tab1:
                        "806149321941 will take sales on one code and receipts "
                        "on the other, which drives one of them negative on its "
                        "own. Worth merging in the item master.")
-            st.dataframe(dups, use_container_width=True, hide_index=True,
+            st.dataframe(dups, width="stretch", hide_index=True,
                          column_config={
                              "Barcodes": st.column_config.TextColumn(
                                  width="medium"),
@@ -1674,7 +1717,7 @@ def candidates_tab(neg, master, master_idx, neg_map,
         default=[c for c in cats if c == "GARMENTS"],
         help="Garments are wrong-sale only")
     c4.write("")
-    run = c4.button("Run matching", type="primary", use_container_width=True,
+    run = c4.button("Run matching", type="primary", width="stretch",
                     disabled=not pick_cats)
     if not pick_cats:
         st.info("Choose a category above to start.")
@@ -1721,6 +1764,10 @@ def candidates_tab(neg, master, master_idx, neg_map,
             st.session_state["sel_version"] = st.session_state.get(
                 "sel_version", 0) + 1
             store = get_store()
+            if (store is not None and st.session_state.get("session_id")
+                    and hasattr(store, "update_session")):
+                store.update_session(st.session_state["session_id"],
+                                     cand_df=cand)
             if store is not None:
                 okr, rid = store.save_run(
                     categories=pick_cats, mode=mode,
@@ -1746,7 +1793,7 @@ def candidates_tab(neg, master, master_idx, neg_map,
             st.caption("A combo holds two different items, e.g. 100ML + 50ML. "
                        "Breaking one releases both, so it needs two target lines. "
                        "Use the Manual pair tab for these.")
-            st.dataframe(combos, use_container_width=True, hide_index=True)
+            st.dataframe(combos, width="stretch", hide_index=True)
 
     if cand is not None and len(cand):
         m1, m2, m3, m4 = st.columns(4)
@@ -1814,7 +1861,7 @@ def candidates_tab(neg, master, master_idx, neg_map,
 
         st.dataframe(
             colour_money(shown[cols], ["neg_val", "neg_qty", "cost_drift_pct"]),
-            use_container_width=True, hide_index=True, height=380,
+            width="stretch", hide_index=True, height=380,
             column_config={
                 "neg_desc": st.column_config.TextColumn("Negative item", width="large"),
                 "par_desc": st.column_config.TextColumn("Outer / source", width="large"),
@@ -1868,7 +1915,7 @@ with tabV:
                               f"{len(printable)} pairs"),
                     unsafe_allow_html=True)
         v2.dataframe(by_sec.rename(columns={"category": "Section"}),
-                     use_container_width=True, hide_index=True,
+                     width="stretch", hide_index=True,
                      column_config={"Clears": st.column_config.NumberColumn(
                          "Clears", format="AED %.2f")})
 
@@ -1882,7 +1929,7 @@ with tabV:
                                  "neg_bc": "Barcode", "neg_desc": "Item",
                                  "neg_val": "Value", "par_desc": "Outer",
                                  "why": "Reason"}),
-                    use_container_width=True, hide_index=True,
+                    width="stretch", hide_index=True,
                     column_config={"Barcode": st.column_config.TextColumn()})
                 st.caption("Loosen the drift tolerance on Candidates if you "
                            "believe a pairing is right despite the cost gap.")
@@ -1898,12 +1945,12 @@ with tabV:
             "⬇ Check sheet for printing",
             make_print_sheet(printable, adj_date, prepared),
             f"CHECK_{adj_date.replace('-', '')}.xlsx", XLSX_MIME,
-            use_container_width=True, type="primary")
+            width="stretch", type="primary")
         p2.download_button(
             "⬇ Full workbook (every column)",
             make_verification_book(printable),
             f"VERIFICATION_{adj_date.replace('-', '')}.xlsx", XLSX_MIME,
-            use_container_width=True)
+            width="stretch")
         st.caption(f"Build sheets is now set to these {len(printable)} pair(s). "
                    f"If staff reject some, enter only the ones that passed "
                    f"below and it narrows to those.")
@@ -1917,11 +1964,11 @@ with tabV:
         typed = t1.text_area("Single barcodes that passed", "", height=110,
                              key="passed_codes")
         t2.write("")
-        if t2.button("All of them", use_container_width=True):
+        if t2.button("All of them", width="stretch"):
             st.session_state["passed_codes"] = "\n".join(
                 cand["neg_bc"].astype(str))
             st.rerun()
-        if t2.button("Clear", use_container_width=True):
+        if t2.button("Clear", width="stretch"):
             st.session_state["passed_codes"] = ""
             st.rerun()
 
@@ -1963,7 +2010,7 @@ with tabV:
                          "neg_qty": "Negative stock",
                          "par_bc": "Outer barcode", "par_desc": "Outer",
                          "outers_needed": "Breaking", "conv": "Conv"}),
-                use_container_width=True, hide_index=True, height=320,
+                width="stretch", hide_index=True, height=320,
                 column_config={
                     "Single barcode": st.column_config.TextColumn(),
                     "Outer barcode": st.column_config.TextColumn()})
@@ -2042,7 +2089,7 @@ def build_tab(adj_date, prepared, checked, verified, txt_prefix, store):
 
         st.markdown("#### All sheets at once")
         if st.button(f"Generate all {math.ceil(len(pool)/int(per))} sheets",
-                     type="primary", use_container_width=True):
+                     type="primary", width="stretch"):
             chunks, work, bad = [], [], 0
             txt_net, txt_rows, alltxt = 0.0, [], []
             for i in range(0, len(pool), int(per)):
@@ -2101,7 +2148,7 @@ def build_tab(adj_date, prepared, checked, verified, txt_prefix, store):
                            f"The Excel sheets are exact.")
                 with st.expander("Which pairs, and by how much"):
                     st.dataframe(pd.DataFrame(bulk["rows"]),
-                                 use_container_width=True, hide_index=True)
+                                 width="stretch", hide_index=True)
 
             stamp = adj_date.replace("-", "")
             XL = ("application/vnd.openxmlformats-officedocument."
@@ -2111,11 +2158,11 @@ def build_tab(adj_date, prepared, checked, verified, txt_prefix, store):
             g1.download_button(
                 f"⬇ Excel — {bulk['sheets']} sheets in one file",
                 bulk["xlsx"], f"ADJUSTMENTS_{stamp}.xlsx", XL,
-                use_container_width=True, type="primary")
+                width="stretch", type="primary")
             g2.download_button(
                 "⬇ Txt — every line in one file", bulk["txt"],
                 f"ADJUSTMENTS_{stamp}.txt", "text/plain",
-                use_container_width=True)
+                width="stretch")
 
             st.caption(f"Or one txt per sheet, named to match the tabs "
                        f"in the workbook:")
@@ -2123,17 +2170,17 @@ def build_tab(adj_date, prepared, checked, verified, txt_prefix, store):
             for i, (name, data_) in enumerate(bulk["txts"]):
                 tcols[i % len(tcols)].download_button(
                     f"⬇ {name}", data_, name, "text/plain",
-                    key=f"bulktxt_{name}", use_container_width=True)
+                    key=f"bulktxt_{name}", width="stretch")
 
             with st.expander("Working file and previews"):
                 st.download_button(
                     "⬇ Working file (reconciliation)", bulk["working"],
-                    f"WORKING_{stamp}.xlsx", XL, use_container_width=True)
+                    f"WORKING_{stamp}.xlsx", XL, width="stretch")
                 st.caption("Combined import file:")
                 st.code(bulk["txt"].decode(), language=None)
 
             if store and st.button("💾 Save this batch to the database",
-                                   use_container_width=True):
+                                   width="stretch"):
                 ok, res = store.save_batch(
                     label=f"{adj_date} · {bulk['pairs']} pairs · "
                           f"{bulk['sheets']} sheets",
@@ -2160,7 +2207,7 @@ def build_tab(adj_date, prepared, checked, verified, txt_prefix, store):
         r3.write(""); r3.write("")
         gen = r3.button(f"Generate serial {int(start_at)}–"
                         f"{int(start_at) + int(count) - 1}",
-                        type="primary", use_container_width=True)
+                        type="primary", width="stretch")
         if st.button("Reset counter"):
             st.session_state["batch"] = 0
             st.session_state.pop("last_sheet", None)
@@ -2203,7 +2250,7 @@ def build_tab(adj_date, prepared, checked, verified, txt_prefix, store):
                 st.success("TOTAL 0.00")
             st.dataframe(
                 colour_money(pdf, ["QTY", "VALUE"]),
-                use_container_width=True, hide_index=True,
+                width="stretch", hide_index=True,
                 column_config={
                     "OUTER BARCODE": st.column_config.TextColumn(width="medium"),
                     "SINGLE BARCODE": st.column_config.TextColumn(width="medium"),
@@ -2220,10 +2267,10 @@ def build_tab(adj_date, prepared, checked, verified, txt_prefix, store):
             d1.download_button(
                 f"⬇ Excel — ADJ_{n:03d}.xlsx", data, f"ADJ_{n:03d}.xlsx",
                 "application/vnd.openxmlformats-officedocument."
-                "spreadsheetml.sheet", use_container_width=True, type="primary")
+                "spreadsheetml.sheet", width="stretch", type="primary")
             d2.download_button(
                 f"⬇ Txt — ADJ_{n:03d}.txt", txt, f"ADJ_{n:03d}.txt",
-                "text/plain", use_container_width=True)
+                "text/plain", width="stretch")
             rep = st.session_state.get("last_txt_rep", {"net": 0, "rows": []})
             if rep["rows"]:
                 st.warning(f"Import file residual {rep['net']:+.2f} AED on "
@@ -2231,7 +2278,7 @@ def build_tab(adj_date, prepared, checked, verified, txt_prefix, store):
                            f"The Excel sheet itself is exact.")
             if store:
                 if st.button(f"💾 Save ADJ_{n:03d} to the database",
-                             use_container_width=True):
+                             width="stretch"):
                     ok, res = store.save_batch(
                         label=f"{adj_date} · ADJ_{n:03d}",
                         files={f"ADJ_{n:03d}.xlsx": data,
@@ -2244,7 +2291,7 @@ def build_tab(adj_date, prepared, checked, verified, txt_prefix, store):
                 st.code(txt.decode(), language="text")
                 if rep["rows"]:
                     st.dataframe(pd.DataFrame(rep["rows"]),
-                                 use_container_width=True, hide_index=True)
+                                 width="stretch", hide_index=True)
 
 with tab2:
     candidates_tab(neg, master, master_idx, neg_map,
@@ -2335,11 +2382,11 @@ with tabA:
                                      alt.Tooltip("Lines:Q", format=",.0f"),
                                      alt.Tooltip("Dead codes:Q")])
                         .properties(height=280).configure_view(strokeWidth=0),
-                        use_container_width=True)
+                        width="stretch")
 
                     st.dataframe(hist.drop(columns=["_id", "Date"])
                                  .sort_values("When", ascending=False),
-                                 use_container_width=True, hide_index=True,
+                                 width="stretch", hide_index=True,
                                  column_config={
                                      "Value": st.column_config.NumberColumn(
                                          format="AED %.2f"),
@@ -2356,7 +2403,7 @@ with tabA:
                         bysnap = bysnap.sort_values("value")
                         st.caption(
                             f"{full.get('source', {}).get('negative_file', '')}")
-                        st.dataframe(bysnap, use_container_width=True,
+                        st.dataframe(bysnap, width="stretch",
                                      hide_index=True,
                                      column_config={
                                          "value": st.column_config.NumberColumn(
@@ -2391,7 +2438,7 @@ with tabA:
                                 f"⬇ {f['name']}  ({f['size']/1024:.0f} KB)",
                                 data, f["name"], mime,
                                 key=f"dl_{b['_id']}_{f['name']}",
-                                use_container_width=True)
+                                width="stretch")
                             if f["name"].endswith(".txt"):
                                 st.code(data.decode("ascii", "ignore"),
                                         language="text")
@@ -2408,7 +2455,7 @@ with tabA:
                         "Candidates": r.get("n_candidates", 0),
                         "Value": round(r.get("value", 0), 2),
                         "Drift tol": r.get("settings", {}).get("drift_tol"),
-                    } for r in runs]), use_container_width=True, hide_index=True)
+                    } for r in runs]), width="stretch", hide_index=True)
                     pick = st.selectbox(
                         "Reopen a run",
                         [f"{r['at'].strftime('%Y-%m-%d %H:%M')} — "
@@ -2459,7 +2506,7 @@ with tab4:
 
     if st.session_state.get("manual"):
         st.dataframe(pd.DataFrame(st.session_state["manual"]),
-                     use_container_width=True, hide_index=True)
+                     width="stretch", hide_index=True)
         if st.button("Clear manual pairs"):
             st.session_state["manual"] = []
             st.rerun()
