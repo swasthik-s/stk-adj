@@ -192,6 +192,45 @@ def invoice_lines(tables):
     return df
 
 
+
+NUMTOK = re.compile(r"^[\d,]+(?:\.\d+)?$")
+
+
+def lines_from_text(text, trailing=6):
+    """Rebuild invoice rows from plain text, for pages that were OCR'd or
+    have no ruled table.
+
+    Read from the RIGHT: the money columns are always the last few numeric
+    tokens (qty, price, amount, vat %, vat amount, after vat). Anchoring on
+    the left breaks whenever OCR fumbles a narrow column — the CF column's
+    "1" came back as "L" and ">" on two rows of the test invoice."""
+    out = []
+    for ln in text.splitlines():
+        toks = ln.split()
+        i = next((k for k, t in enumerate(toks)
+                  if re.fullmatch(r"\d{6,14}", t)), None)
+        if i is None:
+            continue
+        tail = []
+        for t in reversed(toks):
+            if NUMTOK.match(t):
+                tail.append(t)
+            else:
+                break
+        if len(tail) < trailing:
+            continue
+        tail = list(reversed(tail))[-trailing:]
+        qty, price, amount, _vatpct, vatamt, after = [_num(x) for x in tail]
+        sl = _num(toks[0]) if i > 0 and toks[0].isdigit() else None
+        desc = " ".join(toks[i + 1:len(toks) - len(tail)])
+        out.append({"SL": sl, "Barcode": toks[i], "Description": desc,
+                    "Unit": "", "Qty": qty, "UnitPrice": price,
+                    "Amount": amount, "VatAmt": vatamt, "AfterVat": after})
+    df = pd.DataFrame(out)
+    return (df.drop_duplicates("Barcode").reset_index(drop=True)
+            if len(df) else df)
+
+
 def invoice_head(full):
     def grab(pat):
         m = re.search(pat, full, re.I)
@@ -236,20 +275,23 @@ def download_row(items, ns="dl"):
     for i, (col, (label, data, fname, mime, primary)) in enumerate(
             zip(cols, items)):
         col.download_button(label, data, fname, mime,
-                            use_container_width=True,
+                            width="stretch",
                             type="primary" if primary else "secondary",
                             key=f"{ns}_{i}_{fname}")
 
 
 # ==================================================================== input
-up = st.file_uploader("PDF file", type=["pdf"])
-if up is None:
-    st.info("Upload a PDF. Supplier invoices get their line items, totals "
-            "check and iTrade import file. Anything else gets its tables "
-            "cleaned up and its text extracted.")
-    st.caption("A scanned or photographed PDF has no text layer, so nothing "
-               "can be pulled out of it without OCR.")
+ups = st.file_uploader("PDF file(s)", type=["pdf"],
+                       accept_multiple_files=True)
+if not ups:
+    st.info("Upload one or more PDFs. Scanned pages are read automatically — "
+            "nothing to switch on.")
     st.stop()
+
+up = ups[0] if len(ups) == 1 else None
+if up is None:
+    names = [f.name for f in ups]
+    up = ups[names.index(st.selectbox("File", names))]
 
 with st.spinner("Reading…"):
     try:
@@ -291,90 +333,73 @@ def ocr_pdf(raw: bytes, dpi: int = 300):
     return out
 
 
-full = "\n".join(p["text"] for p in pages)
+# --------------------------------------------------------------- auto OCR
+# A PDF can be mixed: some pages generated digitally, others scanned in.
+# Decide page by page rather than treating the file as all one or the other.
+THIN = 40          # characters — below this a page has no usable text layer
 
-if not full.strip():
-    st.warning("No text layer — this is a scan or a photo, so nothing can be "
-               "read from it directly.")
-    if not OCR_OK:
-        st.error("OCR is not available on this server.")
-        st.caption("To enable it, add `pytesseract` and `pypdfium2` to "
-                   "requirements.txt and a file named `packages.txt` "
-                   "containing `tesseract-ocr`.")
-        st.code("pytesseract>=0.3.10\npypdfium2>=4.30", language=None)
-        st.code("tesseract-ocr", language=None)
-        st.caption(f"Detail: {OCR_ERR}")
-        st.stop()
 
-    eng = "RapidOCR" if OCR_ENGINE == "rapidocr" else "Tesseract"
-    st.info(f"Reading with **{eng}**. On a scanned copy of a 58-line supplier "
-            f"invoice RapidOCR recovered every line and both totals matched "
-            f"to the fils. Tesseract misread prices on the same file. Either "
-            f"way the import file is only offered when the lines add up to "
-            f"the invoice total.")
-    dpi = st.select_slider("Scan quality", [200, 300, 400], value=300,
-                           help="Higher is slower and usually more accurate.")
-    if not st.button("Run OCR", type="primary"):
-        st.stop()
-    with st.spinner("Reading the scan — a few seconds per page…"):
+def ocr_page(raw: bytes, index: int, dpi: int):
+    doc = pdfium.PdfDocument(io.BytesIO(raw))
+    img = doc[index].render(scale=dpi / 72).to_pil().convert("RGB")
+    if OCR_ENGINE == "rapidocr":
+        res, _ = _rapid()(np.array(img))
+        return "\n".join(_rows_from_boxes(res))
+    return pytesseract.image_to_string(img, config="--psm 6")
+
+
+@st.cache_data(show_spinner=False)
+def ocr_pages(raw: bytes, which: tuple, dpi: int = 300):
+    return {i: ocr_page(raw, i, dpi) for i in which}
+
+
+need = [p["n"] for p in pages if len(p["text"].strip()) < THIN]
+ocr_used = []
+
+if need and OCR_OK:
+    with st.spinner(f"Reading {len(need)} scanned page(s)…"):
         try:
-            pages = ocr_pdf(up.getvalue(), dpi)
+            got = ocr_pages(up.getvalue(), tuple(n - 1 for n in need), 300)
+            for p in pages:
+                if p["n"] in need and got.get(p["n"] - 1, "").strip():
+                    p["text"] = got[p["n"] - 1]
+                    ocr_used.append(p["n"])
         except Exception as e:
             st.error(f"OCR failed: {type(e).__name__}: {e}")
-            st.stop()
-    full = "\n".join(p["text"] for p in pages)
-    st.session_state["was_ocr"] = True
-    if not full.strip():
-        st.error("OCR found no text either. The scan may be too low quality.")
-        st.stop()
-    st.success(f"OCR read {len(full):,} characters from {len(pages)} page(s).")
-    raw_tables = []          # OCR gives no table structure
+elif need and not OCR_OK:
+    st.warning(f"Page(s) {', '.join(map(str, need))} are scanned and OCR is "
+               f"not installed on this server.")
+    st.caption("Add `pypdfium2` and `rapidocr-onnxruntime` to "
+               "requirements.txt.")
 
-NUMTOK = re.compile(r"^[\d,]+(?:\.\d+)?$")
+full = "\n".join(p["text"] for p in pages)
+if not full.strip():
+    st.error("Nothing could be read from this file at all.")
+    st.stop()
 
-
-def lines_from_text(text, trailing=6):
-    """OCR gives no table structure, so rebuild rows from the text.
-
-    Read from the RIGHT: the money columns are always the last few numeric
-    tokens (qty, price, amount, vat %, vat amount, after vat). Anchoring on
-    the left fails whenever OCR misreads a small column — the CF column's
-    "1" came back as "L" and ">" on two rows of the test invoice."""
-    out = []
-    for ln in text.splitlines():
-        toks = ln.split()
-        i = next((k for k, t in enumerate(toks)
-                  if re.fullmatch(r"\d{6,14}", t)), None)
-        if i is None:
-            continue
-        tail = []
-        for t in reversed(toks):
-            if NUMTOK.match(t):
-                tail.append(t)
-            else:
-                break
-        if len(tail) < trailing:
-            continue
-        tail = list(reversed(tail))[-trailing:]
-        qty, price, amount, _vatpct, vatamt, after = [_num(x) for x in tail]
-        sl = _num(toks[0]) if i > 0 and toks[0].isdigit() else None
-        desc = " ".join(toks[i + 1:len(toks) - len(tail)])
-        out.append({"SL": sl, "Barcode": toks[i], "Description": desc,
-                    "Unit": "", "Qty": qty, "UnitPrice": price,
-                    "Amount": amount, "VatAmt": vatamt, "AfterVat": after})
-    df = pd.DataFrame(out)
-    return df.drop_duplicates("Barcode").reset_index(drop=True) if len(df) else df
-
-
+# Take rows from the ruled tables where they exist, and from the text for
+# anything they missed — a mixed PDF has some of each, so merging beats
+# choosing. Table rows win on a clash: they come from real cell boundaries.
 inv = invoice_lines(raw_tables)
-if not len(inv) and st.session_state.get("was_ocr"):
-    inv = lines_from_text(full)
+from_text = lines_from_text(full)
+if len(from_text):
+    if len(inv):
+        have = set(inv["Barcode"].astype(str))
+        extra = from_text[~from_text["Barcode"].astype(str).isin(have)]
+        if len(extra):
+            inv = pd.concat([inv, extra], ignore_index=True)
+            if inv["SL"].notna().all():
+                inv = inv.sort_values("SL").reset_index(drop=True)
+    else:
+        inv = from_text
 head = invoice_head(full)
 stem = re.sub(r"[^A-Za-z0-9]+", "_",
               (head.get("Invoice no") or up.name.rsplit(".", 1)[0]))[:40]
 
 m1, m2, m3, m4 = st.columns(4)
-m1.metric("Pages", len(pages))
+m1.metric("Pages", len(pages),
+          f"{len(ocr_used)} read by OCR" if ocr_used else None,
+          delta_color="off")
 m2.metric("Blocks found", len(raw_tables))
 m3.metric("Invoice lines", len(inv) if len(inv) else "—")
 m4.metric("Invoice no", head.get("Invoice no") or "—")
@@ -408,10 +433,10 @@ if len(inv):
         if len(off):
             with c3.expander("Which rows"):
                 st.dataframe(off[["SL", "Description", "Qty", "UnitPrice",
-                                  "Amount"]], use_container_width=True,
+                                  "Amount"]], width="stretch",
                              hide_index=True)
 
-        st.dataframe(inv, use_container_width=True, height=400, hide_index=True,
+        st.dataframe(inv, width="stretch", height=400, hide_index=True,
                      column_config={
                          "Barcode": st.column_config.TextColumn(width="medium"),
                          "Description": st.column_config.TextColumn(
@@ -435,7 +460,7 @@ if len(inv):
                            columns=["Field", "Value"])})
         reconciled = (s_amt is not None and head.get("Total")
                       and abs(round(s_amt - head["Total"], 2)) <= 0.05)
-        from_ocr = bool(st.session_state.get("was_ocr"))
+        from_ocr = bool(ocr_used)
 
         if from_ocr and not reconciled:
             st.error(
@@ -504,7 +529,7 @@ with tabs[ti]:
     k2.metric("Blocks skipped", len(skipped))
     if skipped:
         with st.expander("What was skipped"):
-            st.dataframe(pd.DataFrame(skipped), use_container_width=True,
+            st.dataframe(pd.DataFrame(skipped), width="stretch",
                          hide_index=True)
 
     if not kept:
@@ -515,7 +540,7 @@ with tabs[ti]:
                   for n, d, _ in kept]
         pick = labels[0] if len(labels) == 1 else st.selectbox("Table", labels)
         cur = kept[labels.index(pick)][1]
-        st.dataframe(cur, use_container_width=True, height=380, hide_index=True)
+        st.dataframe(cur, width="stretch", height=380, hide_index=True)
 
         tsv = cur.to_csv(index=False, sep="\t").encode()
         download_row([
@@ -529,7 +554,7 @@ with tabs[ti]:
                 f"Excel — all {len(kept)} tables, one tab each",
                 to_excel({f"T{i+1}_{n}": d
                           for i, (n, d, _) in enumerate(kept)}),
-                f"{stem}_all_tables.xlsx", XL, use_container_width=True,
+                f"{stem}_all_tables.xlsx", XL, width="stretch",
                 key="dl_all_tables")
 
 # ===================================================================== text
