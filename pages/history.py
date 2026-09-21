@@ -133,6 +133,38 @@ cand = pd.DataFrame(full.get("candidates") or [])
 negs = pd.DataFrame(full.get("negatives") or [])
 settings = full.get("settings") or {}
 
+def _load_into_workspace():
+    """Hand the saved session to the Negative stock page and switch to it."""
+    c = cand.copy()
+    if len(c):
+        c["use"] = c["use"].fillna(True).astype(bool) \
+            if "use" in c.columns else True
+    st.session_state["restored"] = {
+        "id": chosen["_id"], "when": chosen["When"],
+        "source": full.get("source", {}),
+        "negatives": full.get("negatives") or [],
+        "settings": settings,
+    }
+    st.session_state["cand"] = c if len(c) else None
+    st.session_state["session_id"] = chosen["_id"]
+    st.session_state["batch"] = 0
+    st.session_state.pop("dropped", None)
+    st.session_state.pop("bulk", None)
+    st.session_state.pop("last_sheet", None)
+
+
+lc1, lc2 = st.columns([1, 3])
+if lc1.button(":material/upload_file: Load into workspace", type="primary",
+              width="stretch"):
+    _load_into_workspace()
+    try:
+        st.switch_page("pages/negative_stock.py")
+    except Exception:
+        st.success("Loaded. Open **Negative stock** from the top bar.")
+lc2.caption("Opens this session on the Negative stock page — overview, "
+            "check sheet and build sheets all work without uploading. "
+            "Add the masterlist there only if you want to re-run matching.")
+
 m1, m2, m3, m4 = st.columns(4)
 m1.metric("Negative lines", f"{full.get('neg_lines', 0):,}")
 m2.metric("Negative value", f"AED {full.get('neg_value', 0):,.0f}")
