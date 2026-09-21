@@ -20,6 +20,13 @@ import streamlit as st
 st.set_page_config(page_title="Al Madina Stock Tools", page_icon="📦",
                    layout="wide")
 
+# PIN gate. Keeps a passer-by out; it is not security — see auth.py.
+try:
+    from auth import require_pin
+    require_pin()
+except ImportError:
+    pass          # auth.py not deployed — run open rather than break
+
 HERE = Path(__file__).parent
 PAGES = [
     ("pages/negative_stock.py", "Negative stock", "📦", True),
