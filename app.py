@@ -17,7 +17,7 @@ from pathlib import Path
 
 import streamlit as st
 
-st.set_page_config(page_title="Al Madina Stock Tools", page_icon="📦",
+st.set_page_config(page_title="Al Madina Stock Tools", page_icon=":material/inventory_2:",
                    layout="wide")
 
 # PIN gate. Keeps a passer-by out; it is not security — see auth.py.
@@ -29,9 +29,9 @@ except ImportError:
 
 HERE = Path(__file__).parent
 PAGES = [
-    ("pages/negative_stock.py", "Negative stock", "📦", True),
-    ("pages/pdf_tools.py", "PDF to Excel / txt", "📄", False),
-    ("pages/history.py", "History", "🕘", False),
+    ("pages/negative_stock.py", "Negative stock", ":material/inventory_2:", True),
+    ("pages/pdf_tools.py", "PDF to Excel / txt", ":material/picture_as_pdf:", False),
+    ("pages/history.py", "History", ":material/history:", False),
 ]
 
 found, missing = [], []
