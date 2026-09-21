@@ -63,6 +63,7 @@ class MongoStore:
             self.batches.create_index([("at", DESCENDING)])
             self.batches.create_index("run_id")
             self.db["snapshots"].create_index([("at", DESCENDING)])
+            self.db["sessions"].create_index([("at", DESCENDING)])
         except PyMongoError:
             pass
 
@@ -82,6 +83,95 @@ class MongoStore:
             return True, str(self.db["snapshots"].insert_one(doc).inserted_id)
         except PyMongoError as e:
             return False, f"{type(e).__name__}"
+
+    # ---------- sessions ----------------------------------------------------
+    # A session is one working set: the negative report as loaded, the
+    # candidates, and the settings. The masterlist is NOT stored — it is 100k
+    # rows of reference data you already hold, and every figure a session
+    # needs to rebuild its sheets (costs, conversions) lives on the candidates.
+
+    NEG_COLS = ["bc", "Item Name", "category", "group", "qty", "val"]
+    CAND_COLS = ["neg_bc", "neg_desc", "category", "neg_qty", "neg_val",
+                 "par_bc", "par_desc", "par_stock", "par_cost", "conv",
+                 "outers_needed", "kind", "cost_drift_pct", "problems", "use"]
+
+    @staticmethod
+    def _records(df, cols):
+        if df is None or not len(df):
+            return []
+        keep = [c for c in cols if c in df.columns]
+        out = df[keep].copy()
+        for c in out.columns:          # Mongo cannot store numpy scalars/NaN
+            if out[c].dtype.kind in "fc":
+                out[c] = out[c].astype(float).where(out[c].notna(), None)
+        return out.to_dict("records")
+
+    def save_session(self, *, neg_df, source, settings, cand_df=None,
+                     note="auto"):
+        doc = {
+            "at": datetime.now(timezone.utc),
+            "updated": datetime.now(timezone.utc),
+            "source": source,
+            "settings": settings,
+            "note": note,
+            "neg_lines": int(len(neg_df)),
+            "neg_value": round(float(neg_df["val"].sum()), 2),
+            "negatives": self._records(neg_df, self.NEG_COLS),
+            "candidates": self._records(cand_df, self.CAND_COLS),
+            "n_candidates": 0 if cand_df is None else int(len(cand_df)),
+            "cleared": (0.0 if cand_df is None or not len(cand_df)
+                        else round(float(cand_df.loc[
+                            cand_df.get("use", True) == True,
+                            "neg_val"].abs().sum()), 2)),
+        }
+        try:
+            return True, str(self.db["sessions"].insert_one(doc).inserted_id)
+        except PyMongoError as e:
+            return False, type(e).__name__
+
+    def update_session(self, _id, *, cand_df=None, settings=None, note=None):
+        from bson import ObjectId
+        upd = {"updated": datetime.now(timezone.utc)}
+        if cand_df is not None:
+            upd["candidates"] = self._records(cand_df, self.CAND_COLS)
+            upd["n_candidates"] = int(len(cand_df))
+            use = cand_df["use"] if "use" in cand_df.columns else True
+            upd["cleared"] = round(float(
+                cand_df.loc[use == True, "neg_val"].abs().sum()), 2) \
+                if len(cand_df) else 0.0
+        if settings is not None:
+            upd["settings"] = settings
+        if note is not None:
+            upd["note"] = note
+        try:
+            self.db["sessions"].update_one({"_id": ObjectId(_id)},
+                                           {"$set": upd})
+            return True, _id
+        except PyMongoError as e:
+            return False, type(e).__name__
+
+    def list_sessions(self, limit=100):
+        try:
+            return list(self.db["sessions"].find(
+                {}, {"negatives": 0, "candidates": 0})
+                .sort("at", DESCENDING).limit(limit))
+        except PyMongoError:
+            return []
+
+    def get_session(self, _id):
+        from bson import ObjectId
+        try:
+            return self.db["sessions"].find_one({"_id": ObjectId(_id)})
+        except PyMongoError:
+            return None
+
+    def delete_session(self, _id):
+        from bson import ObjectId
+        try:
+            self.db["sessions"].delete_one({"_id": ObjectId(_id)})
+            return True
+        except PyMongoError:
+            return False
 
     def list_snapshots(self, limit=200):
         try:
