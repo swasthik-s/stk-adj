@@ -93,6 +93,28 @@ SIZE = re.compile(r"\b\d+(?:\.\d+)?\s?(?:GM|G|KG|ML|LTR|L)\b", re.I)
 XLSX_MIME = ("application/vnd.openxmlformats-officedocument"
              ".spreadsheetml.sheet")
 
+
+# ==================== icons ====================
+# Lucide icons, inlined. Only usable where Streamlit renders raw HTML (the
+# tiles and stat cards). Navigation, tabs and buttons only accept emoji or
+# Material icons, so those use :material/…: — the rounded style is a close
+# visual match to Lucide.
+LUCIDE = {
+    "folder-open": "<path d=\"m6 14 1.5-2.9A2 2 0 0 1 9.24 10H20a2 2 0 0 1 1.94 2.5l-1.54 6a2 2 0 0 1-1.95 1.5H4a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h3.9a2 2 0 0 1 1.69.9l.81 1.2a2 2 0 0 0 1.67.9H18a2 2 0 0 1 2 2v2\" />",
+    "pen-line": "<path d=\"M13 21h8\" /> <path d=\"M21.174 6.812a1 1 0 0 0-3.986-3.987L3.842 16.174a2 2 0 0 0-.5.83l-1.321 4.352a.5.5 0 0 0 .623.622l4.353-1.32a2 2 0 0 0 .83-.497z\" />",
+    "settings-2": "<path d=\"M14 17H5\" /> <path d=\"M19 7h-9\" /> <circle cx=\"17\" cy=\"17\" r=\"3\" /> <circle cx=\"7\" cy=\"7\" r=\"3\" />",
+    "save": "<path d=\"M15.2 3a2 2 0 0 1 1.4.6l3.8 3.8a2 2 0 0 1 .6 1.4V19a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2z\" /> <path d=\"M17 21v-7a1 1 0 0 0-1-1H8a1 1 0 0 0-1 1v7\" /> <path d=\"M7 3v4a1 1 0 0 0 1 1h7\" />"
+}
+
+
+def lucide(name, size=26, colour="currentColor", stroke=1.8):
+    inner = LUCIDE.get(name, "")
+    return (f'<svg xmlns="http://www.w3.org/2000/svg" width="{size}" '
+            f'height="{size}" viewBox="0 0 24 24" fill="none" '
+            f'stroke="{colour}" stroke-width="{stroke}" stroke-linecap="round" '
+            f'stroke-linejoin="round" style="flex-shrink:0">{inner}</svg>')
+
+
 # ==================== display helpers ====================
 
 
@@ -1044,16 +1066,17 @@ def get_store():
 
 
 # ==================== UI ====================
-st.title("📦 Negative Stock Adjustment Tool")
+st.title(":material/inventory_2: Negative Stock Adjustment Tool")
 
 # ---- controls as three large tiles ------------------------------------
 def tile_head(icon, title, status, ok):
-    """Big icon, title, and a one-line status in green or grey."""
+    """Lucide icon, title, and a one-line status in green or grey."""
     colour = "#2eb872" if ok else "#8b929c"
     st.markdown(
         f'<div style="display:flex;align-items:center;gap:.75rem;'
         f'margin-bottom:.35rem">'
-        f'<div style="font-size:2rem;line-height:1">{icon}</div>'
+        f'<div style="color:var(--primary-color,#E23D3D);line-height:0">'
+        f'{lucide(icon, 30)}</div>'
         f'<div><div style="font-size:1.15rem;font-weight:600">{title}</div>'
         f'<div style="font-size:.82rem;color:{colour}">{status}</div>'
         f'</div></div>', unsafe_allow_html=True)
@@ -1070,7 +1093,7 @@ _have_n = st.session_state.get("f_neg") is not None
 t1, t2, t3, t4 = st.columns([3, 3, 3, 2], gap="medium")
 
 with t1.container(border=True):
-    tile_head("📂", "Data",
+    tile_head("folder-open", "Data",
               "Both files loaded" if (_have_m and _have_n)
               else "Masterlist and negative report needed",
               _have_m and _have_n)
@@ -1080,7 +1103,7 @@ with t1.container(border=True):
                              type=["xlsx", "xls"], key="f_neg")
 
 with t2.container(border=True):
-    tile_head("✍", "Sheet details",
+    tile_head("pen-line", "Sheet details",
               f"{_prev_date}  ·  {_prev_prep}", True)
     with st.popover("Edit", width="stretch"):
         adj_date = st.text_input("Date", "11-09-26", key="adj_date")
@@ -1092,7 +1115,7 @@ with t2.container(border=True):
                                    help="First field of every line in the .txt")
 
 with t3.container(border=True):
-    tile_head("⚙", "Matching",
+    tile_head("settings-2", "Matching",
               f"Strictness {_prev_thr:.2f}  ·  drift ≤ {_prev_drift:.0f}%",
               True)
     with st.popover("Adjust", width="stretch"):
@@ -1113,14 +1136,14 @@ st.write("")
 
 with t4.container(border=True):
     _sid = st.session_state.get("session_id")
-    tile_head("💾", "Session",
+    tile_head("save", "Session",
               "Saved" if _sid else "Not saved yet", bool(_sid))
     _save_clicked = st.button("Save now", width="stretch",
                               type="primary", key="save_session_btn",
                               disabled=not (f_master and f_neg))
 
 if not (f_master and f_neg):
-    st.info("Drop the two files into the **📂 Data** tile to start.")
+    st.info("Drop the two files into the **Data** tile to start.")
     st.stop()
 
 try:
@@ -1788,7 +1811,7 @@ def candidates_tab(neg, master, master_idx, neg_map,
     combos = st.session_state.get("combos")
 
     if combos is not None and len(combos):
-        with st.expander(f"⚠ {len(combos)} combo packs skipped "
+        with st.expander(f":material/warning: {len(combos)} combo packs skipped "
                          f"({combos['neg_val'].sum():,.0f} AED) — do these by hand"):
             st.caption("A combo holds two different items, e.g. 100ML + 50ML. "
                        "Breaking one releases both, so it needs two target lines. "
@@ -1942,12 +1965,12 @@ with tabV:
 
         p1, p2 = st.columns(2)
         p1.download_button(
-            "⬇ Check sheet for printing",
+            ":material/download: Check sheet for printing",
             make_print_sheet(printable, adj_date, prepared),
             f"CHECK_{adj_date.replace('-', '')}.xlsx", XLSX_MIME,
             width="stretch", type="primary")
         p2.download_button(
-            "⬇ Full workbook (every column)",
+            ":material/download: Full workbook (every column)",
             make_verification_book(printable),
             f"VERIFICATION_{adj_date.replace('-', '')}.xlsx", XLSX_MIME,
             width="stretch")
@@ -2156,11 +2179,11 @@ def build_tab(adj_date, prepared, checked, verified, txt_prefix, store):
 
             g1, g2 = st.columns(2)
             g1.download_button(
-                f"⬇ Excel — {bulk['sheets']} sheets in one file",
+                f":material/download: Excel — {bulk['sheets']} sheets in one file",
                 bulk["xlsx"], f"ADJUSTMENTS_{stamp}.xlsx", XL,
                 width="stretch", type="primary")
             g2.download_button(
-                "⬇ Txt — every line in one file", bulk["txt"],
+                ":material/download: Txt — every line in one file", bulk["txt"],
                 f"ADJUSTMENTS_{stamp}.txt", "text/plain",
                 width="stretch")
 
@@ -2169,17 +2192,17 @@ def build_tab(adj_date, prepared, checked, verified, txt_prefix, store):
             tcols = st.columns(min(4, len(bulk["txts"])) or 1)
             for i, (name, data_) in enumerate(bulk["txts"]):
                 tcols[i % len(tcols)].download_button(
-                    f"⬇ {name}", data_, name, "text/plain",
+                    f":material/download: {name}", data_, name, "text/plain",
                     key=f"bulktxt_{name}", width="stretch")
 
             with st.expander("Working file and previews"):
                 st.download_button(
-                    "⬇ Working file (reconciliation)", bulk["working"],
+                    ":material/download: Working file (reconciliation)", bulk["working"],
                     f"WORKING_{stamp}.xlsx", XL, width="stretch")
                 st.caption("Combined import file:")
                 st.code(bulk["txt"].decode(), language=None)
 
-            if store and st.button("💾 Save this batch to the database",
+            if store and st.button(":material/save: Save this batch to the database",
                                    width="stretch"):
                 ok, res = store.save_batch(
                     label=f"{adj_date} · {bulk['pairs']} pairs · "
@@ -2265,11 +2288,11 @@ def build_tab(adj_date, prepared, checked, verified, txt_prefix, store):
             txt = st.session_state.get("last_txt", b"")
             d1, d2 = st.columns(2)
             d1.download_button(
-                f"⬇ Excel — ADJ_{n:03d}.xlsx", data, f"ADJ_{n:03d}.xlsx",
+                f":material/download: Excel — ADJ_{n:03d}.xlsx", data, f"ADJ_{n:03d}.xlsx",
                 "application/vnd.openxmlformats-officedocument."
                 "spreadsheetml.sheet", width="stretch", type="primary")
             d2.download_button(
-                f"⬇ Txt — ADJ_{n:03d}.txt", txt, f"ADJ_{n:03d}.txt",
+                f":material/download: Txt — ADJ_{n:03d}.txt", txt, f"ADJ_{n:03d}.txt",
                 "text/plain", width="stretch")
             rep = st.session_state.get("last_txt_rep", {"net": 0, "rows": []})
             if rep["rows"]:
@@ -2277,7 +2300,7 @@ def build_tab(adj_date, prepared, checked, verified, txt_prefix, store):
                            f"{len(rep['rows'])} pair(s) — uneven conversion. "
                            f"The Excel sheet itself is exact.")
             if store:
-                if st.button(f"💾 Save ADJ_{n:03d} to the database",
+                if st.button(f":material/save: Save ADJ_{n:03d} to the database",
                              width="stretch"):
                     ok, res = store.save_batch(
                         label=f"{adj_date} · ADJ_{n:03d}",
@@ -2435,7 +2458,7 @@ with tabA:
                                     else "application/vnd.openxmlformats-"
                                          "officedocument.spreadsheetml.sheet")
                             st.download_button(
-                                f"⬇ {f['name']}  ({f['size']/1024:.0f} KB)",
+                                f":material/download: {f['name']}  ({f['size']/1024:.0f} KB)",
                                 data, f["name"], mime,
                                 key=f"dl_{b['_id']}_{f['name']}",
                                 width="stretch")
