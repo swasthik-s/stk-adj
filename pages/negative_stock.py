@@ -1082,11 +1082,22 @@ def tile_head(icon, title, status, ok):
         f'</div></div>', unsafe_allow_html=True)
 
 
+# app-wide settings from the Settings page; plain defaults if no database
+_st_store = get_store()
+APP = (_st_store.get_settings()
+       if _st_store is not None and hasattr(_st_store, "get_settings")
+       else {"autosave_session": True, "save_snapshots": True,
+             "save_runs": True, "prepared": "SWASTHIK", "checked": "IRSHAD",
+             "verified": "THALLATH", "txt_prefix": "SML",
+             "pairs_per_sheet": 11,
+             "remarks": "OUTER BREAK FOR NEGATIVE STOCK",
+             "br_thresh": 0.80, "drift_tol": 15.0, "price_tol": 0.25})
+
 # read current values so each tile can show its state before it is opened
 _prev_date = st.session_state.get("adj_date", "11-09-26")
-_prev_prep = st.session_state.get("prepared", "SWASTHIK")
-_prev_thr = st.session_state.get("br_thresh", 0.80)
-_prev_drift = st.session_state.get("drift_tol", 15.0)
+_prev_prep = st.session_state.get("prepared", APP["prepared"])
+_prev_thr = st.session_state.get("br_thresh", APP["br_thresh"])
+_prev_drift = st.session_state.get("drift_tol", APP["drift_tol"])
 _have_m = st.session_state.get("f_master") is not None
 _have_n = st.session_state.get("f_neg") is not None
 
@@ -1107,10 +1118,10 @@ with t2.container(border=True):
               f"{_prev_date}  ·  {_prev_prep}", True)
     with st.popover("Edit", width="stretch"):
         adj_date = st.text_input("Date", "11-09-26", key="adj_date")
-        prepared = st.text_input("Prepared by", "SWASTHIK", key="prepared")
-        checked = st.text_input("Checked by", "IRSHAD", key="checked")
-        verified = st.text_input("Verified by", "THALLATH", key="verified")
-        txt_prefix = st.text_input("Import file prefix", "SML",
+        prepared = st.text_input("Prepared by", APP["prepared"], key="prepared")
+        checked = st.text_input("Checked by", APP["checked"], key="checked")
+        verified = st.text_input("Verified by", APP["verified"], key="verified")
+        txt_prefix = st.text_input("Import file prefix", APP["txt_prefix"],
                                    key="txt_prefix",
                                    help="First field of every line in the .txt")
 
@@ -1119,16 +1130,16 @@ with t3.container(border=True):
               f"Strictness {_prev_thr:.2f}  ·  drift ≤ {_prev_drift:.0f}%",
               True)
     with st.popover("Adjust", width="stretch"):
-        br_thresh = st.slider("Bundle break strictness", 0.70, 1.00, 0.80,
-                              0.01, key="br_thresh",
+        br_thresh = st.slider("Bundle break strictness", 0.70, 1.00,
+                              float(APP["br_thresh"]), 0.01, key="br_thresh",
                               help="Higher = fewer but safer matches")
         sw_lo, sw_hi = st.slider("Wrong sale similarity window", 0.40, 1.00,
                                  (0.55, 0.95), 0.05, key="sw_window",
                                  help="Similar but not identical")
-        price_tol = st.slider("Wrong sale price tolerance", 0.05, 0.60, 0.25,
-                              0.05, key="price_tol")
-        drift_tol = st.slider("Max cost drift %", 2.0, 60.0, 15.0, 1.0,
-                              key="drift_tol",
+        price_tol = st.slider("Wrong sale price tolerance", 0.05, 0.60,
+                              float(APP["price_tol"]), 0.05, key="price_tol")
+        drift_tol = st.slider("Max cost drift %", 2.0, 60.0,
+                              float(APP["drift_tol"]), 1.0, key="drift_tol",
                               help="A real break barely moves the item's "
                                    "cost. A big drift usually means the pair "
                                    "is wrong.")
@@ -1142,79 +1153,119 @@ with t4.container(border=True):
                               type="primary", key="save_session_btn",
                               disabled=not (f_master and f_neg))
 
-if not (f_master and f_neg):
-    st.info("Drop the two files into the **Data** tile to start.")
+# ---- a session loaded from History can stand in for the uploads ------
+_restored = st.session_state.get("restored")
+if _restored is not None and f_neg is not None:
+    # a new negative report supersedes the loaded session: start fresh
+    st.session_state.pop("restored", None)
+    st.session_state.pop("session_id", None)
+    st.session_state.pop("cand", None)
+    _restored = None
+USING_SAVED = _restored is not None and f_neg is None
+
+if not (USING_SAVED or (f_master and f_neg)):
+    st.info("Drop the two files into the **Data** tile to start — or open "
+            "a saved session from **History**.")
     st.stop()
 
-try:
-    master = load_master(f_master.getvalue())
-except Exception as e:
-    st.error(f"Could not read the masterlist: {e}")
-    st.stop()
-
-raw_neg = f_neg.getvalue()
-sheets = inspect_negatives(raw_neg)
-sheet = sheets[0] if len(sheets) == 1 else st.selectbox(
-    "Which sheet holds the negative stock?", sheets)
-auto_row, auto_score, grid = detect_header(raw_neg, sheet)
-
-neg = None
-try:
-    neg = load_negatives(raw_neg, sheet)
-except Exception as err:
-    st.warning("I could not read this export automatically — map the columns below.")
-    with st.expander("First 15 rows of the file", expanded=True):
-        st.dataframe(grid.head(15), width="stretch")
-    hr = st.number_input(
-        "Which row holds the column headings? (row 1 is the first row)",
-        min_value=1, max_value=40,
-        value=int(auto_row) + 1 if auto_row is not None else 1)
+EMPTY_MASTER = pd.DataFrame(columns=["Item Barcode", "Item No", "Item Name",
+                                     "stock", "last_cost", "wac", "cost",
+                                     "mrp", "Is Active"])
+if f_master is not None:
     try:
-        cols = list(pd.read_excel(io.BytesIO(raw_neg), sheet_name=sheet,
-                                  header=int(hr) - 1, dtype=str, nrows=5)
-                    .dropna(axis=1, how="all").columns)
-    except Exception:
-        cols = []
-    if cols:
-        none = "— none —"
-        c1, c2, c3 = st.columns(3)
-        m_code = c1.selectbox("Barcode / item code", cols,
-                              index=cols.index(_match(cols, CODE_KEYS))
-                              if _match(cols, CODE_KEYS) else 0)
-        m_name = c2.selectbox("Description", cols,
-                              index=cols.index(_match(cols, NAME_KEYS))
-                              if _match(cols, NAME_KEYS) else 0)
-        m_qty = c3.selectbox("Quantity", cols,
-                             index=cols.index(_match(cols, QTY_KEYS))
-                             if _match(cols, QTY_KEYS) else 0)
-        c4, c5, c6 = st.columns(3)
-        opt = [none] + cols
-        def pick(col, label, keys):
-            g = _match(cols, keys)
-            return col.selectbox(label, opt, index=opt.index(g) if g else 0)
-        m_val = pick(c4, "Stock value (optional)", VAL_KEYS)
-        m_cost = pick(c5, "Cost (optional)", CST_KEYS)
-        m_sp = pick(c6, "Selling price (optional)", SP_KEYS)
-        if st.button("Load with this mapping", type="primary"):
-            try:
-                neg = load_negatives(raw_neg, sheet, int(hr) - 1, {
-                    "code": m_code, "name": m_name, "qty": m_qty,
-                    "val": None if m_val == none else m_val,
-                    "cost": None if m_cost == none else m_cost,
-                    "sp": None if m_sp == none else m_sp,
-                })
-                st.session_state["neg_map_ok"] = True
-            except Exception as e2:
-                st.error(f"Still could not read it: {e2}")
-    if neg is None:
+        master = load_master(f_master.getvalue())
+    except Exception as e:
+        st.error(f"Could not read the masterlist: {e}")
         st.stop()
+else:
+    master = EMPTY_MASTER
+HAVE_MASTER = len(master) > 0
+
+if USING_SAVED:
+    _src = _restored.get("source", {}) or {}
+    st.success(
+        f"Working from the saved session of **{_restored.get('when', '')}** — "
+        f"{_src.get('negative_file', 'negative report')}. "
+        + ("Verify and Build sheets are ready. Add the masterlist in the Data "
+           "tile if you want to re-run matching."
+           if not HAVE_MASTER else
+           "Masterlist loaded, so matching can be re-run on the saved "
+           "negatives."))
+    if st.button("Close this session", key="close_restored"):
+        for k in ("restored", "session_id", "cand", "dropped"):
+            st.session_state.pop(k, None)
+        st.rerun()
+
+if USING_SAVED:
+    neg = pd.DataFrame(_restored.get("negatives") or [])
+    for _c in ("qty", "val"):
+        neg[_c] = pd.to_numeric(neg.get(_c), errors="coerce")
+    neg["bc"] = neg["bc"].astype(str)
+else:
+    raw_neg = f_neg.getvalue()
+    sheets = inspect_negatives(raw_neg)
+    sheet = sheets[0] if len(sheets) == 1 else st.selectbox(
+        "Which sheet holds the negative stock?", sheets)
+    auto_row, auto_score, grid = detect_header(raw_neg, sheet)
+
+    neg = None
+    try:
+        neg = load_negatives(raw_neg, sheet)
+    except Exception as err:
+        st.warning("I could not read this export automatically — map the columns below.")
+        with st.expander("First 15 rows of the file", expanded=True):
+            st.dataframe(grid.head(15), width="stretch")
+        hr = st.number_input(
+            "Which row holds the column headings? (row 1 is the first row)",
+            min_value=1, max_value=40,
+            value=int(auto_row) + 1 if auto_row is not None else 1)
+        try:
+            cols = list(pd.read_excel(io.BytesIO(raw_neg), sheet_name=sheet,
+                                      header=int(hr) - 1, dtype=str, nrows=5)
+                        .dropna(axis=1, how="all").columns)
+        except Exception:
+            cols = []
+        if cols:
+            none = "— none —"
+            c1, c2, c3 = st.columns(3)
+            m_code = c1.selectbox("Barcode / item code", cols,
+                                  index=cols.index(_match(cols, CODE_KEYS))
+                                  if _match(cols, CODE_KEYS) else 0)
+            m_name = c2.selectbox("Description", cols,
+                                  index=cols.index(_match(cols, NAME_KEYS))
+                                  if _match(cols, NAME_KEYS) else 0)
+            m_qty = c3.selectbox("Quantity", cols,
+                                 index=cols.index(_match(cols, QTY_KEYS))
+                                 if _match(cols, QTY_KEYS) else 0)
+            c4, c5, c6 = st.columns(3)
+            opt = [none] + cols
+            def pick(col, label, keys):
+                g = _match(cols, keys)
+                return col.selectbox(label, opt, index=opt.index(g) if g else 0)
+            m_val = pick(c4, "Stock value (optional)", VAL_KEYS)
+            m_cost = pick(c5, "Cost (optional)", CST_KEYS)
+            m_sp = pick(c6, "Selling price (optional)", SP_KEYS)
+            if st.button("Load with this mapping", type="primary"):
+                try:
+                    neg = load_negatives(raw_neg, sheet, int(hr) - 1, {
+                        "code": m_code, "name": m_name, "qty": m_qty,
+                        "val": None if m_val == none else m_val,
+                        "cost": None if m_cost == none else m_cost,
+                        "sp": None if m_sp == none else m_sp,
+                    })
+                    st.session_state["neg_map_ok"] = True
+                except Exception as e2:
+                    st.error(f"Still could not read it: {e2}")
+        if neg is None:
+            st.stop()
+
 
 master_idx = master.set_index("Item Barcode").to_dict("index")
 neg_map = dict(zip(neg["bc"], neg["qty"]))
 
 store = get_store()
 # A negative export without a description column is fine — join the names in
-if neg is not None and master is not None:
+if neg is not None and HAVE_MASTER:
     if "Item Name" not in neg.columns:
         neg["Item Name"] = ""
     blank = neg["Item Name"].astype(str).str.strip().eq("")
@@ -1231,58 +1282,64 @@ if neg is not None and master is not None:
                    f"{int(blank.sum() - still.sum())} filled in from the "
                    f"masterlist by barcode.")
 
-if store is not None and neg is not None:
-    # Optional. Never let the snapshot break the page — an older mongo_store.py
-    # on the server will not have save_snapshot, and that must not be fatal.
-    _snap = getattr(store, "save_snapshot", None)
-    if _snap is None:
-        st.session_state["snap_warn"] = (
-            "History snapshots need the newer mongo_store.py. "
-            "Push the updated file and redeploy — everything else works.")
-    else:
-        try:
-            import hashlib
-            sig = hashlib.md5(
-                (str(len(neg)) + str(round(float(neg["val"].sum()), 2))
-                 + str(getattr(f_neg, "name", ""))).encode()).hexdigest()
-            if st.session_state.get("snap_sig") != sig:
-                by = (neg.groupby("category", dropna=False)
-                      .agg(lines=("val", "size"), qty=("qty", "sum"),
-                           value=("val", "sum")).reset_index())
-                okS, sid = _snap(
-                    totals={"lines": int(len(neg)),
-                            "value": round(float(neg["val"].sum()), 2),
-                            "units": round(float(neg["qty"].sum()), 3),
-                            "categories": int(neg["category"].nunique()),
-                            "not_in_master": int((~neg["bc"].isin(
-                                set(master["Item Barcode"]))).sum())},
-                    by_category=[{"category": r["category"],
-                                  "lines": int(r["lines"]),
-                                  "qty": round(float(r["qty"]), 3),
-                                  "value": round(float(r["value"]), 2)}
-                                 for r in by.to_dict("records")],
-                    source={"negative_file": getattr(f_neg, "name", ""),
-                            "master_file": getattr(f_master, "name", "")})
-                st.session_state["snap_sig"] = sig
-                if okS:
-                    st.session_state["snapshot_id"] = sid
-                # new data loaded -> new session, saved automatically
-                if hasattr(store, "save_session"):
-                    okX, xid = store.save_session(
-                        neg_df=neg,
-                        source={"negative_file": getattr(f_neg, "name", ""),
-                                "master_file": getattr(f_master, "name", "")},
-                        settings={"break_threshold": br_thresh,
-                                  "drift_tol": drift_tol,
-                                  "price_tol": price_tol},
-                        note="auto")
-                    if okX:
-                        st.session_state["session_id"] = xid
-                        st.session_state["session_saved_at"] = "auto"
-        except Exception as e:
-            st.session_state["snap_warn"] = (
-                f"Snapshot not saved ({type(e).__name__}). "
-                f"Everything else is unaffected.")
+if store is not None and neg is not None and not USING_SAVED:
+    # Detect genuinely new data once, then let each save decide for itself
+    # whether Settings allows it. The two used to be nested, so switching
+    # off snapshots silently switched off session saving as well.
+    import hashlib
+    _sig = hashlib.md5(
+        (str(len(neg)) + str(round(float(neg["val"].sum()), 2))
+         + str(getattr(f_neg, "name", ""))).encode()).hexdigest()
+    _is_new = st.session_state.get("snap_sig") != _sig
+
+    if _is_new:
+        st.session_state["snap_sig"] = _sig
+        _src = {"negative_file": getattr(f_neg, "name", ""),
+                "master_file": getattr(f_master, "name", "")}
+
+        if APP.get("save_snapshots", True):
+            _snap = getattr(store, "save_snapshot", None)
+            if _snap is None:
+                st.session_state["snap_warn"] = (
+                    "History snapshots need the newer mongo_store.py.")
+            else:
+                try:
+                    by = (neg.groupby("category", dropna=False)
+                          .agg(lines=("val", "size"), qty=("qty", "sum"),
+                               value=("val", "sum")).reset_index())
+                    okS, sid = _snap(
+                        totals={"lines": int(len(neg)),
+                                "value": round(float(neg["val"].sum()), 2),
+                                "units": round(float(neg["qty"].sum()), 3),
+                                "categories": int(neg["category"].nunique()),
+                                "not_in_master": int((~neg["bc"].isin(
+                                    set(master["Item Barcode"]))).sum())},
+                        by_category=[{"category": r["category"],
+                                      "lines": int(r["lines"]),
+                                      "qty": round(float(r["qty"]), 3),
+                                      "value": round(float(r["value"]), 2)}
+                                     for r in by.to_dict("records")],
+                        source=_src)
+                    if okS:
+                        st.session_state["snapshot_id"] = sid
+                except Exception as e:
+                    st.session_state["snap_warn"] = (
+                        f"Snapshot not saved ({type(e).__name__}).")
+
+        if APP.get("autosave_session", True) and hasattr(store,
+                                                         "save_session"):
+            try:
+                okX, xid = store.save_session(
+                    neg_df=neg, source=_src,
+                    settings={"break_threshold": br_thresh,
+                              "drift_tol": drift_tol, "price_tol": price_tol,
+                              "date": adj_date, "prepared": prepared},
+                    note="auto")
+                if okX:
+                    st.session_state["session_id"] = xid
+            except Exception as e:
+                st.session_state["snap_warn"] = (
+                    f"Session not saved ({type(e).__name__}).")
 
 if _save_clicked:
     if store is None or not hasattr(store, "save_session"):
@@ -1315,8 +1372,9 @@ with tab1:
     total = float(neg["val"].sum())
     units = float(neg["qty"].sum())
     _mcodes = set(master["Item Barcode"].astype(str).str.strip())
-    in_master = neg["bc"].map(
+    in_master = (neg["bc"].map(
         lambda c: resolve_bc(c, _mcodes)[0] is not None)
+        if HAVE_MASTER else pd.Series(True, index=neg.index))
 
     c1, c2, c3, c4 = st.columns(4)
     c1.markdown(stat_card("Negative lines", f"{len(neg):,}",
@@ -1696,7 +1754,7 @@ with tab1:
                        "genuinely do not exist under any form of the code.")
             item_table(miss, key="dead")
 
-    dups = duplicate_barcodes(master)
+    dups = duplicate_barcodes(master) if HAVE_MASTER else pd.DataFrame()
     if len(dups):
         same = int(dups["Likely same product"].sum())
         with st.expander(f"One product under two barcodes — {len(dups)} pair(s), "
@@ -1741,7 +1799,10 @@ def candidates_tab(neg, master, master_idx, neg_map,
         help="Garments are wrong-sale only")
     c4.write("")
     run = c4.button("Run matching", type="primary", width="stretch",
-                    disabled=not pick_cats)
+                    disabled=not pick_cats or len(master) == 0)
+    if len(master) == 0:
+        st.info("Matching needs the masterlist — add it in the Data tile. "
+                "The pairs from the saved session are shown below.")
     if not pick_cats:
         st.info("Choose a category above to start.")
 
@@ -1791,7 +1852,7 @@ def candidates_tab(neg, master, master_idx, neg_map,
                     and hasattr(store, "update_session")):
                 store.update_session(st.session_state["session_id"],
                                      cand_df=cand)
-            if store is not None:
+            if store is not None and APP.get("save_runs", True):
                 okr, rid = store.save_run(
                     categories=pick_cats, mode=mode,
                     settings={"break_threshold": br_thresh,
@@ -2104,9 +2165,10 @@ def build_tab(adj_date, prepared, checked, verified, txt_prefix, store):
         elif "serial" in order:
             pool = sorted(pool, key=lambda r: (r.get("serial") or 1e9))
 
-        remarks = st.text_input("Remarks", "OUTER BREAK FOR NEGATIVE STOCK")
+        remarks = st.text_input("Remarks", APP["remarks"])
         per = st.number_input("Pairs per sheet", min_value=1, max_value=60,
-                              value=PAIRS_PER_FILE, step=1, key="per_sheet",
+                              value=int(APP["pairs_per_sheet"]), step=1,
+                              key="per_sheet",
                               help="11 pairs = 22 rows. Pair 12 starts a new sheet.")
         st.caption(f"{len(pool)} pairs → {math.ceil(len(pool)/int(per))} sheets")
 
