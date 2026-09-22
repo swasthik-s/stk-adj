@@ -20,7 +20,23 @@ FALLBACK_PIN = "1234"      # used only when secrets has no [auth] pin
 MAX_TRIES = 5
 
 
+def _db_pin():
+    """PIN set on the Settings page, if the database is reachable."""
+    try:
+        from mongo_store import MongoStore
+        cfg = st.secrets["mongo"]
+        s = MongoStore(cfg["uri"], cfg.get("db", "stockadj"), timeout_ms=3000)
+        return str(s.get_settings().get("pin") or "")
+    except Exception:
+        return ""
+
+
 def _pin():
+    """Settings page first, then secrets, then the fallback in this file.
+    If the database is down the app still opens with the secrets PIN."""
+    p = _db_pin()
+    if p:
+        return p
     try:
         return str(st.secrets["auth"]["pin"])
     except Exception:
