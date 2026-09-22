@@ -30,9 +30,25 @@ except ImportError:
 HERE = Path(__file__).parent
 PAGES = [
     ("pages/negative_stock.py", "Negative stock", ":material/inventory_2:", True),
-    ("pages/pdf_tools.py", "PDF to Excel", ":material/picture_as_pdf:", False),
+    ("pages/pdf_tools.py", "PDF to Excel / txt", ":material/picture_as_pdf:", False),
     ("pages/history.py", "History", ":material/history:", False),
+    ("pages/settings.py", "Settings", ":material/settings:", False),
 ]
+
+# Daily housekeeping: prune old records if Settings has it switched on.
+# Runs at most once per browser session and never blocks the page.
+if not st.session_state.get("_pruned_today"):
+    st.session_state["_pruned_today"] = True
+    try:
+        from mongo_store import MongoStore
+        _cfg = st.secrets["mongo"]
+        _s = MongoStore(_cfg["uri"], _cfg.get("db", "stockadj"),
+                        timeout_ms=3000)
+        _set = _s.get_settings()
+        if _set.get("auto_prune"):
+            _s.prune_all(_set)
+    except Exception:
+        pass
 
 found, missing = [], []
 for rel, title, icon, default in PAGES:
