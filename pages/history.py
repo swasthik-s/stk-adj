@@ -17,28 +17,40 @@ import streamlit as st
 st.title(":material/history: History")
 
 # ---------------------------------------------------------------- store
-try:
-    from mongo_store import MongoStore
-except Exception as e:
-    st.error(f"The database module could not be loaded: {e}")
-    st.stop()
-
-
-@st.cache_resource(show_spinner=False)
-def _store():
+def _diagnose():
+    """Return (store, reason). Each failure gets its own message — they used
+    to share one, which blamed secrets when the real cause was an old file."""
+    try:
+        import mongo_store
+    except Exception as e:
+        return None, (f"`mongo_store.py` could not be imported "
+                      f"({type(e).__name__}: {e}). Check it is in the repo "
+                      f"root beside `app.py`.")
+    if not hasattr(mongo_store.MongoStore, "list_sessions"):
+        return None, ("The server is running an **old `mongo_store.py`** — "
+                      "it has no settings support. Push the new file, then "
+                      "**Manage app → Reboot**. A reboot is needed even after "
+                      "pushing: Streamlit keeps imported files in memory.")
     try:
         cfg = st.secrets["mongo"]
-        s = MongoStore(cfg["uri"], cfg.get("db", "stockadj"))
-        s.ensure_indexes()
-        return s
+        uri = cfg["uri"]
     except Exception:
-        return None
+        return None, ("No `[mongo]` block with a `uri` in your secrets. Add it "
+                      "under Manage app → Settings → Secrets.")
+    try:
+        s = mongo_store.MongoStore(uri, cfg.get("db", "stockadj"))
+        ok, msg = s.check()
+        if not ok:
+            return None, f"Database unreachable: {msg}"
+        s.ensure_indexes()
+        return s, "ok"
+    except Exception as e:
+        return None, f"Could not connect: {type(e).__name__}: {e}"
 
 
-store = _store()
-if store is None or not hasattr(store, "list_sessions"):
-    st.info("History needs the database. Add the `[mongo]` block to your "
-            "secrets — the Archive tab on the Negative stock page shows it.")
+store, _why = _diagnose()
+if store is None:
+    st.error(_why)
     st.stop()
 
 
