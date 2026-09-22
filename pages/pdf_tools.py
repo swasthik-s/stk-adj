@@ -28,20 +28,36 @@ except Exception as e:
 # tables — on this supplier's invoice it scored 2/5 on prices where RapidOCR
 # scored 5/5.
 OCR_ENGINE, OCR_ERR = None, None
+_errs = []
+# 1) rapidocr — the maintained package. Works on Python 3.8 to 3.14, models
+#    bundled in the wheel, nothing downloaded at runtime.
 try:
     import numpy as np
     import pypdfium2 as pdfium
-    from rapidocr_onnxruntime import RapidOCR
+    from rapidocr import RapidOCR
     OCR_ENGINE = "rapidocr"
 except Exception as e:
-    OCR_ERR = f"{type(e).__name__}: {e}"
+    _errs.append(f"rapidocr: {type(e).__name__}: {e}")
+# 2) rapidocr_onnxruntime — the older package. Same accuracy, but it refuses
+#    to install on Python 3.13 and later, so it is only a local fallback.
+if OCR_ENGINE is None:
+    try:
+        import numpy as np
+        import pypdfium2 as pdfium
+        from rapidocr_onnxruntime import RapidOCR
+        OCR_ENGINE = "rapidocr_legacy"
+    except Exception as e:
+        _errs.append(f"rapidocr_onnxruntime: {type(e).__name__}: {e}")
+# 3) tesseract — last resort; misreads decimals on dense tables.
+if OCR_ENGINE is None:
     try:
         import pypdfium2 as pdfium
         import pytesseract
         pytesseract.get_tesseract_version()
         OCR_ENGINE = "tesseract"
-    except Exception as e2:
-        OCR_ERR = f"{OCR_ERR} | tesseract: {type(e2).__name__}: {e2}"
+    except Exception as e:
+        _errs.append(f"tesseract: {type(e).__name__}: {e}")
+OCR_ERR = " | ".join(_errs) or None
 OCR_OK = OCR_ENGINE is not None
 
 
@@ -300,11 +316,24 @@ with st.spinner("Reading…"):
         st.error(f"Could not read that file: {type(e).__name__}: {e}")
         st.stop()
 
+def _ocr_boxes(img):
+    """(box, text) pairs from whichever RapidOCR is installed. The new
+    package returns an object with .boxes/.txts; the old one a list."""
+    out = _rapid()(np.array(img))
+    if OCR_ENGINE == "rapidocr":
+        if out is None or getattr(out, "boxes", None) is None:
+            return []
+        return list(zip(out.boxes, out.txts))
+    res = out[0] if isinstance(out, tuple) else out
+    return [(r[0], r[1]) for r in (res or [])]
+
+
 def _rows_from_boxes(res, tol=14):
     """Rebuild visual rows from OCR boxes using their y positions, then order
     each row left to right. Without this the columns interleave."""
-    items = sorted((sum(p[1] for p in box) / 4, sum(p[0] for p in box) / 4, txt)
-                   for box, txt, *_ in (res or []))
+    items = sorted((float(sum(p[1] for p in box)) / 4,
+                    float(sum(p[0] for p in box)) / 4, txt)
+                   for box, txt in (res or []))
     rows, cur, last = [], [], None
     for y, x, txt in items:
         if last is None or abs(y - last) <= tol:
@@ -324,8 +353,8 @@ def ocr_pdf(raw: bytes, dpi: int = 300):
     out = []
     for i in range(len(doc)):
         img = doc[i].render(scale=dpi / 72).to_pil().convert("RGB")
-        if OCR_ENGINE == "rapidocr":
-            res, _ = _rapid()(np.array(img))
+        if OCR_ENGINE in ("rapidocr", "rapidocr_legacy"):
+            res = _ocr_boxes(img)
             text = "\n".join(_rows_from_boxes(res))
         else:
             text = pytesseract.image_to_string(img, config="--psm 6")
@@ -342,8 +371,8 @@ THIN = 40          # characters — below this a page has no usable text layer
 def ocr_page(raw: bytes, index: int, dpi: int):
     doc = pdfium.PdfDocument(io.BytesIO(raw))
     img = doc[index].render(scale=dpi / 72).to_pil().convert("RGB")
-    if OCR_ENGINE == "rapidocr":
-        res, _ = _rapid()(np.array(img))
+    if OCR_ENGINE in ("rapidocr", "rapidocr_legacy"):
+        res = _ocr_boxes(img)
         return "\n".join(_rows_from_boxes(res))
     return pytesseract.image_to_string(img, config="--psm 6")
 
