@@ -84,6 +84,103 @@ class MongoStore:
         except PyMongoError as e:
             return False, f"{type(e).__name__}"
 
+    # ---------- app settings ------------------------------------------------
+    # One document holds every setting the Settings page controls. Missing
+    # keys fall back to DEFAULTS, so adding a setting never breaks old data.
+
+    DEFAULTS = {
+        # what gets saved
+        "autosave_session": True,
+        "save_snapshots": True,
+        "save_runs": True,
+        # retention, in days (0 = keep forever)
+        "keep_sessions": 30, "keep_snapshots": 90,
+        "keep_runs": 30, "keep_batches": 60,
+        "auto_prune": False,
+        # sheet defaults
+        "prepared": "SWASTHIK", "checked": "IRSHAD", "verified": "THALLATH",
+        "txt_prefix": "SML", "pairs_per_sheet": 11,
+        "remarks": "OUTER BREAK FOR NEGATIVE STOCK",
+        # matching defaults
+        "br_thresh": 0.80, "drift_tol": 15.0, "price_tol": 0.25,
+        # access
+        "pin": "",
+    }
+
+    COLLECTIONS = {"sessions": "Sessions", "snapshots": "Upload snapshots",
+                   "runs": "Matching runs", "batches": "Saved sheets"}
+
+    def get_settings(self):
+        try:
+            doc = self.db["app_settings"].find_one({"_id": "app"}) or {}
+        except PyMongoError:
+            doc = {}
+        out = dict(self.DEFAULTS)
+        out.update({k: v for k, v in doc.items() if k != "_id"})
+        return out
+
+    def save_settings(self, values: dict):
+        clean = {k: v for k, v in values.items() if k in self.DEFAULTS}
+        try:
+            self.db["app_settings"].update_one(
+                {"_id": "app"}, {"$set": clean}, upsert=True)
+            return True
+        except PyMongoError:
+            return False
+
+    # ---------- storage + pruning ---------------------------------------------
+    def storage(self):
+        """Per-collection count, oldest and newest record, and size."""
+        rows = []
+        for coll, label in self.COLLECTIONS.items():
+            c = self.db[coll]
+            try:
+                n = c.count_documents({})
+                first = c.find_one({}, {"at": 1}, sort=[("at", 1)])
+                last = c.find_one({}, {"at": 1}, sort=[("at", -1)])
+                try:
+                    size = self.db.command("collstats", coll).get("size", 0)
+                except Exception:
+                    size = None
+                rows.append({"key": coll, "label": label, "count": n,
+                             "oldest": first and first.get("at"),
+                             "newest": last and last.get("at"),
+                             "bytes": size})
+            except PyMongoError:
+                rows.append({"key": coll, "label": label, "count": None,
+                             "oldest": None, "newest": None, "bytes": None})
+        try:
+            total = self.db.command("dbstats").get("dataSize", None)
+        except Exception:
+            total = None
+        return rows, total
+
+    def count_older(self, coll, days):
+        if not days or coll not in self.COLLECTIONS:
+            return 0
+        from datetime import timedelta
+        cutoff = datetime.now(timezone.utc) - timedelta(days=int(days))
+        try:
+            return self.db[coll].count_documents({"at": {"$lt": cutoff}})
+        except PyMongoError:
+            return 0
+
+    def prune(self, coll, days):
+        """Delete records older than `days`. 0 or None does nothing."""
+        if not days or coll not in self.COLLECTIONS:
+            return 0
+        from datetime import timedelta
+        cutoff = datetime.now(timezone.utc) - timedelta(days=int(days))
+        try:
+            return self.db[coll].delete_many({"at": {"$lt": cutoff}}).deleted_count
+        except PyMongoError:
+            return 0
+
+    def prune_all(self, settings=None):
+        s = settings or self.get_settings()
+        return {coll: self.prune(coll, s.get(f"keep_{coll}", 0))
+                for coll in self.COLLECTIONS}
+
     # ---------- sessions ----------------------------------------------------
     # A session is one working set: the negative report as loaded, the
     # candidates, and the settings. The masterlist is NOT stored — it is 100k
