@@ -6,8 +6,14 @@ rather than relying on folder discovery, so navigation behaves the same
 locally and on Streamlit Cloud.
 
     app.py                     this router
-    pages/negative_stock.py    negative stock adjustments
-    pages/pdf_tools.py         invoices and any other PDF -> Excel / txt
+    views/negative_stock.py    negative stock adjustments
+    views/pdf_tools.py         invoices and any other PDF -> Excel / txt
+
+The folder is called views/, NOT pages/, and that matters. Streamlit treats a
+folder literally named pages/ as an old-style multipage app and builds its own
+sidebar nav from it. When that happens only the page script runs — app.py does
+not — so set_page_config never fires and the app loses both the top navigation
+and the wide layout. Renaming the folder is the only reliable way to stop it.
 
 st.set_page_config belongs here and nowhere else — a page script that
 calls it again raises an error.
@@ -29,11 +35,11 @@ except ImportError:
 
 HERE = Path(__file__).parent
 PAGES = [
-    ("pages/negative_stock.py", "Negative stock", ":material/inventory_2:", True),
-    ("pages/pdf_tools.py", "PDF to Excel / txt", ":material/picture_as_pdf:", False),
-    ("pages/templates.py", "Item templates", ":material/description:", False),
-    ("pages/history.py", "History", ":material/history:", False),
-    ("pages/settings.py", "Settings", ":material/settings:", False),
+    ("views/negative_stock.py", "Negative stock", ":material/inventory_2:", True),
+    ("views/pdf_tools.py", "PDF to Excel / txt", ":material/picture_as_pdf:", False),
+    ("views/templates.py", "Item templates", ":material/description:", False),
+    ("views/history.py", "History", ":material/history:", False),
+    ("views/settings.py", "Settings", ":material/settings:", False),
 ]
 
 # Daily housekeeping: prune old records if Settings has it switched on.
@@ -50,6 +56,18 @@ if not st.session_state.get("_pruned_today"):
             _s.prune_all(_set)
     except Exception:
         pass
+
+# A leftover pages/ folder from an earlier deploy takes priority over
+# everything below and quietly reinstates the sidebar nav, so say so loudly
+# rather than letting it look like a styling bug.
+_stale = HERE / "pages"
+if _stale.is_dir() and any(_stale.glob("*.py")):
+    st.error(
+        "There is still a **pages/** folder in the repo. Streamlit builds its "
+        "own sidebar navigation from it and skips this file, which loses the "
+        "top navigation and the wide layout. Delete pages/ — the page files "
+        "now live in views/."
+    )
 
 found, missing = [], []
 for rel, title, icon, default in PAGES:
