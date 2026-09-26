@@ -75,7 +75,8 @@ TYPES = {
         "label": "Creation",
         "purpose": "CREATION",
         "prefix": "CRE",
-        "fields": ["date", "vendor", "maingrp"],
+        # The store's own creation sheet carries a Remark line as well.
+        "fields": ["date", "vendor", "maingrp", "remark"],
         "cols": _ITEM_COLS,
         "blanks": {"single": "NEED BARCODE", "outer": "NEED BARCODE"},
     },
@@ -93,14 +94,15 @@ TYPES = {
         "prefix": "DSC",
         "fields": ["date", "reason"],
         "cols": [
-            ("sno", "S.No", 12, "c", "index"),
-            ("single", "Single Barcode", 30, "c", "text"),
-            ("old_desc", "Old Description", 75, "l", "text"),
-            ("unit", "Unit", 16, "c", "text"),
-            ("new_desc", "New Description", 75, "l", "text"),
-            ("cost", "COST", 22, "r", "num"),
-            ("rsp", "RSP", 22, "r", "num"),
-            ("gp", "GP%", 21, "r", "calc"),
+            ("sno", "S.No", 11, "c", "index"),
+            ("single", "Single Barcode", 26, "c", "text"),
+            ("outer", "Outer Barcode", 26, "c", "text"),
+            ("old_desc", "Old Description", 68, "l", "text"),
+            ("unit", "Unit", 14, "c", "text"),
+            ("new_desc", "New Description", 68, "l", "text"),
+            ("cost", "COST", 21, "r", "num"),
+            ("rsp", "RSP", 21, "r", "num"),
+            ("gp", "GP%", 18, "r", "calc"),
         ],
         "blanks": {},
     },
@@ -162,10 +164,13 @@ def row_problems(kind, row, i):
         out.append(f"row {i}: {FIELD_LABELS.get(desc_key, 'description')} "
                    f"is empty")
     c, r = num(row.get("cost")), num(row.get("rsp"))
-    if c is None:
-        out.append(f"row {i}: COST is empty")
-    if r is None:
-        out.append(f"row {i}: RSP is empty")
+    # On a description sheet the prices are only there to identify the item;
+    # the change being asked for is the name, so blank prices are not a fault.
+    if kind != "description":
+        if c is None:
+            out.append(f"row {i}: COST is empty")
+        if r is None:
+            out.append(f"row {i}: RSP is empty")
     if c is not None and r is not None:
         if r == 0:
             out.append(f"row {i}: RSP is zero, so GP% cannot be worked out")
@@ -173,8 +178,9 @@ def row_problems(kind, row, i):
             out.append(f"row {i}: RSP {r:,.2f} is below COST {c:,.2f} — "
                        f"selling at a loss")
     if kind == "description":
-        if is_blank(row.get("single")):
-            out.append(f"row {i}: single barcode is empty")
+        if is_blank(row.get("single")) and is_blank(row.get("outer")):
+            out.append(f"row {i}: no barcode — iTrade needs one to find the "
+                       f"item being renamed")
         old = "" if is_blank(row.get("old_desc")) else str(row["old_desc"]).strip()
         new = "" if is_blank(row.get("new_desc")) else str(row["new_desc"]).strip()
         if old and new and old.upper() == new.upper():
