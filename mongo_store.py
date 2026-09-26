@@ -27,7 +27,7 @@ from bson.binary import Binary
 from pymongo import MongoClient, DESCENDING
 from pymongo.errors import PyMongoError
 
-STORE_VERSION = 2          # bump when methods are added
+STORE_VERSION = 3          # bump when methods are added
 MAX_DOC = 15 * 1024 * 1024          # leave headroom under Mongo's 16 MB limit
 
 
@@ -38,6 +38,7 @@ class MongoStore:
         self.db = self.client[dbname]
         self.runs = self.db["runs"]
         self.batches = self.db["batches"]
+        self.templates = self.db["templates"]
 
     # ---------- health ----------
     def check(self):
@@ -64,6 +65,9 @@ class MongoStore:
             self.batches.create_index("run_id")
             self.db["snapshots"].create_index([("at", DESCENDING)])
             self.db["sessions"].create_index([("at", DESCENDING)])
+            self.templates.create_index([("at", DESCENDING)])
+            self.templates.create_index("kind")
+            self.templates.create_index("ref")
         except PyMongoError:
             pass
 
@@ -96,9 +100,14 @@ class MongoStore:
         # retention, in days (0 = keep forever)
         "keep_sessions": 30, "keep_snapshots": 90,
         "keep_runs": 30, "keep_batches": 60,
+        # Templates are the paper trail for created and renamed items, so they
+        # outlive the working data by default. 0 = keep forever.
+        "keep_templates": 365,
         "auto_prune": False,
         # sheet defaults
         "prepared": "SWASTHIK", "checked": "IRSHAD", "verified": "THALLATH",
+        # template signatories — the purchaser signs creations and renames
+        "purchaser": "IQBAL", "approved": "THALLATH",
         "txt_prefix": "SML", "pairs_per_sheet": 11,
         "remarks": "OUTER BREAK FOR NEGATIVE STOCK",
         # matching defaults
@@ -108,7 +117,8 @@ class MongoStore:
     }
 
     COLLECTIONS = {"sessions": "Sessions", "snapshots": "Upload snapshots",
-                   "runs": "Matching runs", "batches": "Saved sheets"}
+                   "runs": "Matching runs", "batches": "Saved sheets",
+                   "templates": "Item templates"}
 
     def get_settings(self):
         try:
@@ -378,3 +388,77 @@ class MongoStore:
             return True
         except PyMongoError:
             return False
+
+    # ---------- item templates (creation / activation / description) --------
+    # One document per generated sheet: the header fields, every row as it was
+    # typed, and the PDF itself. The rows are kept as plain values, not only
+    # inside the PDF, so a past template can be reopened and edited rather
+    # than retyped — which is the whole point of keeping them.
+
+    def save_template(self, *, kind, ref, header, rows, pdf, filename,
+                      note=""):
+        if pdf is not None and len(pdf) > MAX_DOC:
+            return False, "PDF too large to store"
+        doc = {
+            "at": datetime.now(timezone.utc),
+            "kind": kind,                  # creation | activation | description
+            "ref": ref,                    # human reference, e.g. CRE-260926-1
+            "header": header,              # date, vendor, main group, reason…
+            "rows": rows,                  # list of dicts, as typed
+            "n_rows": len(rows),
+            "filename": filename,
+            "note": note,
+        }
+        if pdf is not None:
+            doc["pdf"] = Binary(pdf)
+        try:
+            return True, str(self.templates.insert_one(doc).inserted_id)
+        except PyMongoError as e:
+            return False, f"{type(e).__name__}: {e}"
+
+    def list_templates(self, limit=100, kind=None):
+        q = {"kind": kind} if kind else {}
+        try:
+            cur = (self.templates.find(q, {"pdf": 0})
+                   .sort("at", DESCENDING).limit(limit))
+            out = []
+            for d in cur:
+                d["id"] = str(d.pop("_id"))
+                out.append(d)
+            return out
+        except PyMongoError:
+            return []
+
+    def get_template(self, _id):
+        from bson import ObjectId
+        try:
+            d = self.templates.find_one({"_id": ObjectId(_id)})
+        except PyMongoError:
+            return None
+        if d:
+            d["id"] = str(d.pop("_id"))
+            if isinstance(d.get("pdf"), Binary):
+                d["pdf"] = bytes(d["pdf"])
+        return d
+
+    def delete_template(self, _id):
+        from bson import ObjectId
+        try:
+            self.templates.delete_one({"_id": ObjectId(_id)})
+            return True
+        except PyMongoError:
+            return False
+
+    def next_template_ref(self, kind, date_str):
+        """CRE-260926-3 — the third creation sheet made on that date. Counting
+        existing documents keeps the numbering stable across sessions and
+        devices, which a session counter would not."""
+        prefix = {"creation": "CRE", "activation": "ACT",
+                  "description": "DSC"}.get(kind, "TPL")
+        stem = f"{prefix}-{date_str}"
+        try:
+            n = self.templates.count_documents(
+                {"ref": {"$regex": f"^{stem}-"}})
+        except PyMongoError:
+            n = 0
+        return f"{stem}-{n + 1}"
