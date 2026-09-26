@@ -84,7 +84,9 @@ with tab_store:
                "Nothing is deleted until you press Prune.")
 
     keep = {}
-    cols = st.columns(4)
+    # One column per collection — a fixed count would silently drop any
+    # collection added later.
+    cols = st.columns(max(len(rows), 1))
     for col, r in zip(cols, rows):
         k = f"keep_{r['key']}"
         keep[k] = col.number_input(f"{r['label']} — days", 0, 3650,
@@ -157,6 +159,14 @@ with tab_defaults:
     prepared = d1.text_input("Prepared by", S["prepared"])
     checked = d2.text_input("Checked by", S["checked"])
     verified = d3.text_input("Verified by", S["verified"])
+    st.markdown("**Item template signatories**")
+    t1, t2 = st.columns(3)[:2]
+    purchaser = t1.text_input("Concerned purchaser", S.get("purchaser", ""))
+    approved = t2.text_input("Approved by", S.get("approved", ""),
+                             help="Printed on creation, activation and "
+                                  "description sheets.")
+
+    st.markdown("**Sheets**")
     e1, e2, e3 = st.columns(3)
     prefix = e1.text_input("Import file prefix", S["txt_prefix"])
     per = e2.number_input("Pairs per sheet", 1, 60, int(S["pairs_per_sheet"]))
@@ -175,6 +185,7 @@ with tab_defaults:
                  width="stretch"):
         ok = store.save_settings({
             "prepared": prepared, "checked": checked, "verified": verified,
+            "purchaser": purchaser, "approved": approved,
             "txt_prefix": prefix, "pairs_per_sheet": int(per),
             "remarks": remarks, "br_thresh": br, "drift_tol": dt,
             "price_tol": pt})
