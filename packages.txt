@@ -1,1 +1,7 @@
 tesseract-ocr
+# Uncomment the line below to turn on PDF output for uploaded Excel
+# templates. Without it an uploaded template comes back as .xlsx only;
+# the built-in layout still makes PDFs either way.
+# It is a large package (a few hundred MB) and lengthens the first boot,
+# so only add it if you actually upload your own templates.
+# libreoffice-calc
