@@ -27,7 +27,7 @@ from bson.binary import Binary
 from pymongo import MongoClient, DESCENDING
 from pymongo.errors import PyMongoError
 
-STORE_VERSION = 3          # bump when methods are added
+STORE_VERSION = 4          # bump when methods are added
 MAX_DOC = 15 * 1024 * 1024          # leave headroom under Mongo's 16 MB limit
 
 
@@ -445,6 +445,61 @@ class MongoStore:
         from bson import ObjectId
         try:
             self.templates.delete_one({"_id": ObjectId(_id)})
+            return True
+        except PyMongoError:
+            return False
+
+    # ---------- uploaded Excel layouts --------------------------------------
+    # The store's own template workbook, plus where in it everything goes.
+    # One per sheet type, replaced when a new one is uploaded — keeping a
+    # history of layouts would only invite picking the wrong one.
+
+    @staticmethod
+    def _bsonable(v):
+        """MongoDB document keys must be strings, and a layout straight out of
+        scan() has integer column keys and tuple positions. Left alone this
+        fails only at save time, on the real server, after the person has
+        already done the mapping work — so it is normalised here."""
+        if isinstance(v, dict):
+            return {str(k): MongoStore._bsonable(x) for k, x in v.items()}
+        if isinstance(v, (list, tuple)):
+            return [MongoStore._bsonable(x) for x in v]
+        return v
+
+    def save_layout(self, *, kind, layout, workbook, filename, note=""):
+        if workbook is not None and len(workbook) > MAX_DOC:
+            return False, "Template file too large to store"
+        layout = self._bsonable(layout or {})
+        doc = {"kind": kind, "layout": layout, "filename": filename,
+               "note": note, "at": datetime.now(timezone.utc),
+               "bytes": len(workbook or b"")}
+        if workbook is not None:
+            doc["workbook"] = Binary(workbook)
+        try:
+            self.db["layouts"].replace_one({"_id": kind}, doc, upsert=True)
+            return True, kind
+        except PyMongoError as e:
+            return False, f"{type(e).__name__}: {e}"
+
+    def get_layout(self, kind):
+        try:
+            d = self.db["layouts"].find_one({"_id": kind})
+        except PyMongoError:
+            return None
+        if d and isinstance(d.get("workbook"), Binary):
+            d["workbook"] = bytes(d["workbook"])
+        return d
+
+    def list_layouts(self):
+        try:
+            return [{**d, "workbook": None}
+                    for d in self.db["layouts"].find({}, {"workbook": 0})]
+        except PyMongoError:
+            return []
+
+    def delete_layout(self, kind):
+        try:
+            self.db["layouts"].delete_one({"_id": kind})
             return True
         except PyMongoError:
             return False
