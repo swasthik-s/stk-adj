@@ -62,6 +62,10 @@ FIELD_ALIASES = {
     "remark": ["remark", "remarks", "note"],
 }
 
+FIELD_LABELS_SHORT = {"purpose": "PURPOSE", "date": "DATE",
+                      "vendor": "VENDOR", "maingrp": "Main Grp",
+                      "reason": "REASON", "remark": "Remark"}
+
 SIGN_ALIASES = {
     "prepared": ["preparedby", "prepared"],
     "purchaser": ["concernedpurchaser", "purchaser", "concerned"],
@@ -181,9 +185,17 @@ def scan(data, sheet=None):
             unmapped.append((c, txt))
 
     # ---- how many rows the table has room for ----------------------------
-    # The ruled box is the real capacity. Counting blank rows instead would
-    # run past the table and start writing over the signature block, so the
-    # ruling is counted first and the blank run is only a fallback.
+    # The ruled box is the real capacity, and it is what the person sees as
+    # "the table". Two things make a row look occupied when it is not:
+    #
+    #   a GP% formula. Every one of these templates ships with
+    #   =(I7-H7)/I7*100 already sitting in the blank rows. That is part of
+    #   the empty form, not data, and reading it as data made the capacity
+    #   come out as zero — so rows were inserted into a table that had room,
+    #   the signature block was pushed down, and the untouched formulas below
+    #   the last item printed #DIV/0!.
+    #
+    #   the signature labels. They stop the count, which is the point.
     def ruled(r):
         for c in columns.values():
             b = ws.cell(row=r, column=c).border
@@ -192,16 +204,28 @@ def scan(data, sheet=None):
                 return True
         return False
 
+    def occupied(r):
+        """Real content in this row — formulas do not count."""
+        for c in range(1, max_col + 1):
+            txt = grid.get((r, c))
+            if not txt or str(txt).startswith("="):
+                continue
+            if _match(txt, SIGN_ALIASES):
+                return True                 # signature block: stop here
+            if c in columns.values():
+                return True                 # typed data in a mapped column
+        return False
+
     data_rows = 0
     for r in range(data_start, max_row + 1):
-        if any(grid.get((r, c)) for c in columns.values()) or not ruled(r):
+        if occupied(r) or not ruled(r):
             break
         data_rows += 1
         if data_rows > 200:
             break
     if data_rows == 0:                      # template has no ruling at all
         for r in range(data_start, max_row + 1):
-            if any(grid.get((r, c)) for c in columns.values()):
+            if occupied(r):
                 break
             data_rows += 1
             if data_rows > 80:
@@ -233,6 +257,17 @@ def scan(data, sheet=None):
         key = _match(txt, SIGN_ALIASES)
         if key and key not in signs:
             signs[key] = _merged_end(ws, r, c)
+
+    # A field whose row is hidden will be written and never seen. The store's
+    # creation sheet hides its Remark row, so this is not hypothetical.
+    hidden = sorted({FIELD_LABELS_SHORT.get(k, k) for k, (r, _c) in
+                     fields.items()
+                     if ws.row_dimensions[r].hidden})
+    if hidden:
+        warnings.append(
+            f"{', '.join(hidden)} sits on a hidden row in this template, so "
+            f"anything entered there will not print. Unhide the row in Excel "
+            f"if you want it shown.")
 
     if "date" not in fields:
         warnings.append("No DATE cell found — set it below or the date will "
@@ -304,6 +339,53 @@ def fill(data, layout, header, rows, *, gp_values=None, blanks=None,
     spare = int(layout.get("data_rows") or 0)
     n = len(rows)
 
+    # ---- make room FIRST --------------------------------------------------
+    # Order matters. These templates put a merged signature block under the
+    # table (B15:C16, H15:J16 and so on). openpyxl's insert_rows moves cell
+    # values but leaves merged ranges and row heights where they were, so the
+    # merges end up lying across the new data rows — writes into them are
+    # silently dropped and the signature block vanishes. So the sheet is
+    # stretched before anything is written, and the merges and heights are
+    # carried down by hand.
+    extra, at = 0, None
+    if n > spare:
+        extra = n - spare
+        at = start + max(spare, 1)
+
+        moved = [(r.min_row, r.min_col, r.max_row, r.max_col)
+                 for r in list(ws.merged_cells.ranges) if r.min_row >= at]
+        for r1, c1, r2, c2 in moved:
+            ws.unmerge_cells(start_row=r1, start_column=c1,
+                             end_row=r2, end_column=c2)
+
+        heights = {r: d.height for r, d in ws.row_dimensions.items()
+                   if r >= at and d.height is not None}
+        hidden = {r for r, d in ws.row_dimensions.items()
+                  if r >= at and d.hidden}
+
+        ws.insert_rows(at, extra)
+
+        for r1, c1, r2, c2 in moved:
+            ws.merge_cells(start_row=r1 + extra, start_column=c1,
+                           end_row=r2 + extra, end_column=c2)
+        for r, h in sorted(heights.items(), reverse=True):
+            ws.row_dimensions[r + extra].height = h
+        for r in sorted(hidden, reverse=True):
+            ws.row_dimensions[r + extra].hidden = True
+            ws.row_dimensions[r].hidden = False
+
+        # New rows arrive unstyled — copy the ruling off the first data row
+        # so the table keeps its box.
+        for i in range(extra):
+            for c in range(1, (ws.max_column or 1) + 1):
+                _copy_style(ws.cell(row=start, column=c),
+                            ws.cell(row=at + i, column=c))
+
+    def moved_row(r):
+        """Where a row ended up once the sheet was stretched."""
+        r = int(r)
+        return r + extra if (at is not None and r >= at) else r
+
     # ---- header lines -----------------------------------------------------
     for key, pos in (layout.get("fields") or {}).items():
         if key == "purpose":
@@ -311,14 +393,13 @@ def fill(data, layout, header, rows, *, gp_values=None, blanks=None,
         val = header.get(key)
         if val in (None, ""):
             continue
-        r, c = int(pos[0]), int(pos[1])
-        ws.cell(row=r, column=c).value = val
+        ws.cell(row=moved_row(pos[0]), column=int(pos[1])).value = val
 
     for key, pos in (layout.get("signs") or {}).items():
         name = header.get(key)
         if not name:
             continue
-        r, c = int(pos[0]), int(pos[1])
+        r, c = moved_row(pos[0]), int(pos[1])
         cur = ws.cell(row=r, column=c).value
         label = str(cur).strip() if cur else ""
         # Keep the printed label and append the name, rather than replacing
@@ -326,18 +407,6 @@ def fill(data, layout, header, rows, *, gp_values=None, blanks=None,
         ws.cell(row=r, column=c).value = (
             f"{label} {name}".strip() if label.rstrip().endswith(":")
             else (f"{label}: {name}" if label else name))
-
-    # ---- make room --------------------------------------------------------
-    if n > spare:
-        extra = n - spare
-        at = start + max(spare, 1)
-        ws.insert_rows(at, extra)
-        # insert_rows leaves the new rows unstyled — copy the ruling from the
-        # first data row so the table does not lose its box.
-        for i in range(extra):
-            for c in range(1, (ws.max_column or 1) + 1):
-                _copy_style(ws.cell(row=start, column=c),
-                            ws.cell(row=at + i, column=c))
 
     # ---- is GP% a formula in the template? --------------------------------
     gp_col = columns.get("gp")
@@ -368,9 +437,12 @@ def fill(data, layout, header, rows, *, gp_values=None, blanks=None,
                 v = blanks[key]
             ws.cell(row=r, column=col).value = v
 
-    # ---- clear any ruled rows left over -----------------------------------
+    # ---- clear the rest of the band ---------------------------------------
+    # Every template row past the last item, across the whole width, not just
+    # the mapped columns. The GP% formulas that ship in the blank rows live
+    # here; left alone they print #DIV/0! under the last real line.
     for r in range(start + n, start + max(spare, n)):
-        for col in columns.values():
+        for col in range(1, (ws.max_column or 1) + 1):
             ws.cell(row=r, column=col).value = None
 
     if page_fit:
