@@ -31,6 +31,7 @@ HERE = Path(__file__).parent
 PAGES = [
     ("pages/negative_stock.py", "Negative stock", ":material/inventory_2:", True),
     ("pages/pdf_tools.py", "PDF to Excel / txt", ":material/picture_as_pdf:", False),
+    ("pages/templates.py", "Item templates", ":material/description:", False),
     ("pages/history.py", "History", ":material/history:", False),
     ("pages/settings.py", "Settings", ":material/settings:", False),
 ]
