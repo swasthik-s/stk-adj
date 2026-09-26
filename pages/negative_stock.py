@@ -178,7 +178,11 @@ def colour_money(df, cols):
 @st.cache_data(show_spinner=False)
 def load_master(raw: bytes) -> pd.DataFrame:
     want = ["Item Barcode", "Item No", "Item Name", "Stock", "Cost", "WAC",
-            "Net MRP", "Is Active", "Category", "Group", "Brand"]
+            "Net MRP", "Is Active", "Class", "Category", "Group", "Brand"]
+    # NB iTrade naming: masterlist "Class" is what the banded negative
+    # report calls a category (GROCERY FOOD, GARMENTS…). Masterlist
+    # "Category" is a coarser level above it (SUPERMARKET, LIFESTYLE…).
+    # is used to categorise flat negative reports that have no bands
     head = pd.read_csv(io.BytesIO(raw), dtype=str, encoding="latin-1", nrows=0)
     use = [c for c in want if c in head.columns]
     m = pd.read_csv(io.BytesIO(raw), dtype=str, encoding="latin-1", usecols=use)
@@ -270,6 +274,7 @@ def load_negatives(raw: bytes, sheet=0, header_row=None, mapping=None) -> pd.Dat
     c_qty = mapping.get("qty") or _match(cols, QTY_KEYS)
     if not (c_code and c_qty):
         raise ValueError(f"MISSING_COLUMNS:{cols}")
+    c_grp = _match(cols, ["group name", "sub group", "subgroup"])
     c_val = mapping.get("val") or _match(cols, VAL_KEYS)
     c_sp = mapping.get("sp") or _match(cols, SP_KEYS)
     c_cost = mapping.get("cost") or _match(cols, CST_KEYS)
@@ -314,6 +319,8 @@ def load_negatives(raw: bytes, sheet=0, header_row=None, mapping=None) -> pd.Dat
 
         r["group"] = grp or "STOCK"
         r["category"] = cat or "UNCATEGORISED"
+        # flat reports (no category bands) carry a Group Name per row instead
+        r["subgroup"] = (str(r.get(c_grp, "")).strip() if c_grp else "")
         r["Item Name"] = name
         r["bc"] = code
         rows.append(r)
@@ -1264,6 +1271,29 @@ master_idx = master.set_index("Item Barcode").to_dict("index")
 neg_map = dict(zip(neg["bc"], neg["qty"]))
 
 store = get_store()
+# Flat reports (e.g. iTrade's "Negative Stock Report") have no category bands,
+# so every row arrives as UNCATEGORISED. Take the category from the
+# masterlist by barcode, which gives the same 26 categories as the banded
+# report; fall back to the report's own Group Name if the barcode is unknown.
+if (neg is not None and HAVE_MASTER and "category" in neg.columns
+        and neg["category"].eq("UNCATEGORISED").mean() > 0.9
+        and "Class" in master.columns):
+    _cat = dict(zip(master["Item Barcode"].astype(str).str.strip(),
+                    master["Class"].astype(str).str.strip().str.upper()))
+
+    def _category(row):
+        hit, _ = resolve_bc(row["bc"], _cat)
+        c = _cat.get(hit, "") if hit else ""
+        if c and c.lower() not in ("nan", "none", ""):
+            return c
+        # Don't fall back to the report's Group Name here: it is a finer
+        # level, and mixing levels turns 27 categories into 60-odd.
+        return "UNCATEGORISED"
+
+    neg["category"] = neg.apply(_category, axis=1)
+    st.caption("This report has no category headings, so categories were "
+               "taken from the masterlist. Its own Group Name is kept too.")
+
 # A negative export without a description column is fine — join the names in
 if neg is not None and HAVE_MASTER:
     if "Item Name" not in neg.columns:
@@ -1710,10 +1740,12 @@ with tab1:
             st.code(joiner.join(codes), language=None)
 
     def item_table(df, key="x"):
-        cols = ["bc", "Item Name"] + ([itemno_col] if itemno_col else []) + \
-               ["qty", "val"]
+        has_sub = ("subgroup" in df.columns
+                   and df["subgroup"].astype(str).str.strip().ne("").any())
+        cols = (["bc", "Item Name"] + (["subgroup"] if has_sub else [])
+                + ([itemno_col] if itemno_col else []) + ["qty", "val"])
         names = {"bc": "ItemCode", "Item Name": "Item Name",
-                 "qty": "Quantity", "val": "Stock Value"}
+                 "subgroup": "Group", "qty": "Quantity", "val": "Stock Value"}
         out = df.sort_values("val")[cols].rename(columns=names)
         st.dataframe(
             colour_money(out, ["Quantity", "Stock Value"]),
