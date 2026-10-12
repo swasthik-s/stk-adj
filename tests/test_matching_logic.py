@@ -82,7 +82,7 @@ def test_mixed_size_combo_is_flagged_for_manual_review():
     ns = _load_matcher()
     master = _master([
         {"Item Barcode": "100", "Item Name": "TEST SHAMPOO 100ML + 50ML",
-         "stock": 10, "Cost": 12, "WAC": 12, "Net MRP": 15, "Pack Qty": 2},
+         "stock": 10, "last_cost": 12, "wac": 12, "mrp": 15, "Pack Qty": 2},
     ])
     breaks, combos = ns["find_breaks"](
         master, pd.DataFrame([_negative("200", "TEST SHAMPOO 100ML + 50ML")]), 0.35
@@ -100,8 +100,16 @@ def test_wrong_sale_candidate_uses_stock_and_size_guard():
         {"Item Barcode": "101", "Item Name": "TEST COLA 500ML",
          "stock": 50, "last_cost": 3, "wac": 3, "mrp": 3.5},
         {"Item Barcode": "200", "Item Name": "OTHER ITEM 330ML",
-         "stock": 0, "Cost": 2, "WAC": 2, "Net MRP": 2.5},
+         "stock": 0, "last_cost": 2, "wac": 2, "mrp": 2.5},
     ])
     swaps = ns["find_swaps"](master, pd.DataFrame([_negative("200", "TEST COLA 330ML", qty=-2)]), 0.1, 0.8, 0.25)
     assert len(swaps) == 1
     assert swaps.iloc[0]["par_bc"] == "100"
+
+
+def test_common_pack_quantity_formats_are_detected():
+    ns = _load_matcher()
+    features = ns["_match_features"]
+    assert features("TEST COLA 12X330ML")["pack_qty"] == 12
+    assert features("TEST COLA PACK OF 6")["pack_qty"] == 6
+    assert features("TEST COLA 12 PCS")["pack_qty"] == 12
