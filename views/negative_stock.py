@@ -437,7 +437,9 @@ SIZE_JOIN_SIZE = re.compile(
     r"\d+(?:\.\d+)?\s?(?:GM|G|KG|ML|LTR|L)", re.I)
 FREE_QTY = re.compile(r"\b(?:\d+\s*)?(?:PCS|GM|G|ML)?\s*FREE\b", re.I)
 SIZE_TOKEN = re.compile(r"(?<![A-Z0-9])(\d+(?:\.\d+)?)\s*(KG|KGS|G|GM|GRAMS?|L|LTR|LIT(?:RE|ER)S?|ML|PCS?|PC|EA|EACH)(?![A-Z])", re.I)
-MULT_TOKEN = re.compile(r"\b(?:MULTI\s*)?(\d{1,3})\s*(?:X|PCS?/?PACK|PACK(?:S)?|BOTTLES?|CANS?|TINS?|ROLLS?|BARS?|SACHETS?)\b|\b(?:MULTI|PACK)\s*[- ]?(\d{1,3})\b", re.I)
+MULT_TOKEN = re.compile(
+    r"\b(?:(\d{1,3})\s*[xX]\s*(?=\d)|(\d{1,3})\s*(?:PCS?|UNITS?|PACKS?|BOXES?|BOTTLES?|CANS?|TINS?|ROLLS?|BARS?|SACHETS?)\b|"
+    r"(?:MULTI|PACK(?:\s+OF)?)\s*[- ]?(\d{1,3})\b|(\d{1,3})\s*['’]S\b)", re.I)
 MATCH_NOISE = {
     "THE","AND","WITH","FOR","OF","IN","NEW","ITEM","PCS","PC","EA","EACH",
     "PACK","PACKS","MULTI","VALUE","OFFER","PROMO","PROMOTION","ASSORTED",
@@ -475,11 +477,13 @@ def _match_features(desc, pack_qty=None, packing=None):
     # Do not let the multiplier/size numerals dominate text similarity.
     tokens = {t for t in tokens if not re.fullmatch(r"\d+(?:\.\d+)?", t)}
     explicit_mult = 0
-    for a, b in MULT_TOKEN.findall(raw):
-        try:
-            explicit_mult = max(explicit_mult, int(a or b))
-        except (TypeError, ValueError):
-            pass
+    for match in MULT_TOKEN.findall(raw):
+        for group in match:
+            if group:
+                try:
+                    explicit_mult = max(explicit_mult, int(group))
+                except (TypeError, ValueError):
+                    pass
     qty = 0
     try:
         qty = int(float(str(pack_qty or "").replace(",", "")))
