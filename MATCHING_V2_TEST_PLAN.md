@@ -15,7 +15,7 @@
 From the repository root:
 
 \`\`\`bash
-pip install pandas pytest streamlit openpyxl altair
+pip install pandas pytest
 pytest -q
 \`\`\`
 
