@@ -188,7 +188,8 @@ def colour_money(df, cols):
 @st.cache_data(show_spinner=False)
 def load_master(raw: bytes) -> pd.DataFrame:
     want = ["Item Barcode", "Item No", "Item Name", "Stock", "Cost", "WAC",
-            "Net MRP", "Is Active", "Class", "Category", "Group", "Brand"]
+            "Net MRP", "Is Active", "Class", "Category", "Group", "Brand",
+            "Pack Qty", "Packing", "IsBundleItem"]
     # NB iTrade naming: masterlist "Class" is what the banded negative
     # report calls a category (GROCERY FOOD, GARMENTS…). Masterlist
     # "Category" is a coarser level above it (SUPERMARKET, LIFESTYLE…).
@@ -428,161 +429,281 @@ def cost_drift(derived, code, own_pair):
     return round(min(((derived - c) / c * 100 for c in costs), key=abs), 1)
 
 
-# ==================== matching ====================
+# ==================== matching v2 ====================
+# Deterministic, explainable matcher. Similarity retrieves candidates; pack,
+# size, stock, and price evidence decide whether a candidate is usable.
 SIZE_JOIN_SIZE = re.compile(
     r"\d+(?:\.\d+)?\s?(?:GM|G|KG|ML|LTR|L)\s*(?:[+&]|PLUS|WITH|AND)\s*"
     r"\d+(?:\.\d+)?\s?(?:GM|G|KG|ML|LTR|L)", re.I)
 FREE_QTY = re.compile(r"\b(?:\d+\s*)?(?:PCS|GM|G|ML)?\s*FREE\b", re.I)
+SIZE_TOKEN = re.compile(r"(?<![A-Z0-9])(\d+(?:\.\d+)?)\s*(KG|KGS|G|GM|GRAMS?|L|LTR|LIT(?:RE|ER)S?|ML|PCS?|PC|EA|EACH)(?![A-Z])", re.I)
+MULT_TOKEN = re.compile(
+    r"\b(?:(\d{1,3})\s*[xX]\s*(?=\d)|(\d{1,3})\s*(?:PCS?|UNITS?|PACKS?|BOXES?|BOTTLES?|CANS?|TINS?|ROLLS?|BARS?|SACHETS?)\b|"
+    r"(?:MULTI|PACK(?:\s+OF)?)\s*[- ]?(\d{1,3})\b|(\d{1,3})\s*['’]S\b)", re.I)
+MATCH_NOISE = {
+    "THE","AND","WITH","FOR","OF","IN","NEW","ITEM","PCS","PC","EA","EACH",
+    "PACK","PACKS","MULTI","VALUE","OFFER","PROMO","PROMOTION","ASSORTED",
+    "SIZE","REGULAR","ORIGINAL"
+}
+MATCH_ALIASES = {
+    "KGS":"KG","GRAM":"G","GRAMS":"G","GM":"G","LITRE":"L","LITRES":"L",
+    "LITER":"L","LITERS":"L","LTR":"L","MILLILITRE":"ML","MILLILITRES":"ML",
+    "MILLILITER":"ML","MILLILITERS":"ML","PCS":"PC","EACH":"PC"
+}
 
+def _clean_match_text(value):
+    text = str(value or "").upper().replace("&", " AND ")
+    text = re.sub(r"[^A-Z0-9.]+", " ", text)
+    words = []
+    for word in text.split():
+        words.append(MATCH_ALIASES.get(word, word))
+    return words
+
+def _match_features(desc, pack_qty=None, packing=None):
+    raw = str(desc or "").upper()
+    sizes = set()
+    for amount, unit in SIZE_TOKEN.findall(raw):
+        value = float(amount)
+        unit = MATCH_ALIASES.get(unit.upper(), unit.upper())
+        if unit == "KG":
+            value *= 1000
+            unit = "G"
+        elif unit == "L":
+            value *= 1000
+            unit = "ML"
+        sizes.add((unit, round(value, 4)))
+    tokens = set(_clean_match_text(raw))
+    tokens -= MATCH_NOISE
+    # Do not let the multiplier/size numerals dominate text similarity.
+    tokens = {t for t in tokens if not re.fullmatch(r"\d+(?:\.\d+)?", t)}
+    explicit_mult = 0
+    for match in MULT_TOKEN.findall(raw):
+        for group in match:
+            if group:
+                try:
+                    explicit_mult = max(explicit_mult, int(group))
+                except (TypeError, ValueError):
+                    pass
+    qty = 0
+    try:
+        qty = int(float(str(pack_qty or "").replace(",", "")))
+    except (TypeError, ValueError):
+        pass
+    if qty <= 1:
+        qty = explicit_mult
+    pack_text = str(packing or "").strip().upper()
+    if qty <= 1 and pack_text:
+        found = re.search(r"\b(\d{1,3})\b", pack_text)
+        if found:
+            try:
+                qty = int(found.group(1))
+            except ValueError:
+                pass
+    return {"tokens": tokens, "sizes": sizes, "pack_qty": qty,
+            "is_combo": len(sizes) >= 2 or bool(SIZE_JOIN_SIZE.search(raw)) or
+                        (bool(FREE_QTY.search(raw)) and bool(sizes) and
+                         bool(re.search(r"[+&]", raw)))}
 
 def is_combo(desc):
-    """A combo holds two DIFFERENT items in one pack: 100ML + 50ML.
-    Breaking it releases both, so a one-target break would be wrong.
-
-    Deliberately narrow: an ampersand inside a brand name (GLOW&LOVELY,
-    REPAIR&REGENERATE) is NOT a combo. Two distinct size tokens is the test."""
-    s = str(desc).upper()
-    sizes = {x.replace(" ", "") for x in SIZE.findall(s)}
-    if len(sizes) >= 2:
-        return True
-    if SIZE_JOIN_SIZE.search(s):
-        return True
-    if FREE_QTY.search(s) and len(sizes) >= 1 and re.search(r"[+&]", s):
-        return True
-    return False
-
+    return _match_features(desc).get("is_combo", False)
 
 def toks(s, strip_mult=True):
-    s = str(s).upper()
-    sizes = {x.replace(" ", "") for x in SIZE.findall(s)}
-    core = MULT.sub(" ", s) if strip_mult else s
-    return {w for w in NOISE.sub(" ", core).split() if len(w) > 1}, sizes
-
+    feat = _match_features(s)
+    return feat["tokens"], {str(x[1]) + x[0] for x in feat["sizes"]}
 
 def mult_of(s):
-    s = str(s).upper()
-    best, found = 1, False
-    for mt in MULT.finditer(s):
-        found = True
-        for g in mt.groups():
-            if g and 2 <= int(g) <= 200:
-                best = max(best, int(g))
-    return (best if best > 1 else (2 if found else 1)), found
+    feat = _match_features(s)
+    return max(1, feat["pack_qty"]), feat["pack_qty"] > 1
 
+def _jaccard(a, b):
+    union = len(a | b)
+    return len(a & b) / union if union else 0.0
+
+def _containment(a, b):
+    return len(a & b) / max(1, min(len(a), len(b)))
+
+def _match_score(neg, candidate):
+    a, b = neg["features"], candidate["features"]
+    token_j = _jaccard(a["tokens"], b["tokens"])
+    contain = _containment(a["tokens"], b["tokens"])
+    # Containment helps descriptions where the single item omits pack wording.
+    score = 0.65 * token_j + 0.35 * contain
+    if a["sizes"] and b["sizes"]:
+        if a["sizes"] & b["sizes"]:
+            score += 0.12
+        else:
+            score -= 0.38
+    elif bool(a["sizes"]) != bool(b["sizes"]):
+        score -= 0.08
+    if a["pack_qty"] > 1 and b["pack_qty"] > 1 and a["pack_qty"] != b["pack_qty"]:
+        score -= 0.15
+    # Metadata is useful corroboration, not enough to create a match by itself.
+    for field, weight in (("Brand", 0.08), ("Class", 0.04), ("Group", 0.04)):
+        av = str(neg.get(field, "") or "").strip().upper()
+        bv = str(candidate.get(field, "") or "").strip().upper()
+        if av and bv:
+            score += weight if av == bv else -weight * 0.35
+    return max(0.0, min(1.0, score)), token_j, contain
+
+def _active_value(value):
+    s = str(value or "").strip().upper()
+    return s not in {"UNCHECKED", "FALSE", "NO", "0", "INACTIVE", "NAN"}
+
+@st.cache_data(show_spinner=False)
+def _prepare_master(m):
+    mm = m.copy()
+    defaults = {
+        "Item Barcode":"", "Item Name":"", "stock":0.0, "cost":0.0,
+        "last_cost":0.0, "wac":0.0, "mrp":0.0, "Pack Qty":0,
+        "Packing":"", "IsBundleItem":"", "Brand":"", "Class":"", "Group":""
+    }
+    for col, default in defaults.items():
+        if col not in mm.columns:
+            mm[col] = default
+    mm["Item Barcode"] = mm["Item Barcode"].astype(str).str.strip()
+    for col in ("stock","cost","last_cost","wac","mrp","Pack Qty"):
+        mm[col] = pd.to_numeric(mm[col].astype(str).str.replace(",","",regex=False),
+                                errors="coerce").fillna(0)
+    mm["_active"] = mm["Is Active"].map(_active_value) if "Is Active" in mm else True
+    mm["_features"] = [
+        _match_features(row.get("Item Name"), row.get("Pack Qty"), row.get("Packing"))
+        for row in mm.to_dict("records")
+    ]
+    return mm
 
 @st.cache_data(show_spinner=False)
 def find_breaks(m: pd.DataFrame, d: pd.DataFrame, threshold: float,
                 skip_combo: bool = True):
-    mm = m.copy()
-    mm[["mult", "isml"]] = pd.DataFrame(
-        mm["Item Name"].map(mult_of).tolist(), index=mm.index
-    )
+    mm = _prepare_master(m)
     own_cost = dict(zip(mm["Item Barcode"], mm["cost"]))
     own_pair = dict(zip(mm["Item Barcode"], zip(mm["last_cost"], mm["wac"])))
-    par = mm[(mm["stock"] > 0) & mm["isml"] & (mm["mult"] > 1)]
-    P, inv = [], defaultdict(list)
-    for r in par[["Item Barcode", "Item Name", "stock", "mult", "cost"]].to_dict("records"):
-        t, sz = toks(r["Item Name"])
-        P.append((r["Item Barcode"], r["Item Name"], r["stock"], r["mult"],
-                  t, sz, r["cost"]))
-        for w in t:
-            inv[w].append(len(P) - 1)
-
+    # A parent must be explicitly pack-like by description or master pack metadata.
+    is_bundle = mm["IsBundleItem"].astype(str).str.strip().str.upper().isin(
+        {"CHECKED","TRUE","YES","1","Y"})
+    parents = mm[(mm["stock"] > 0) & mm["_active"] &
+                 ((mm["_features"].map(lambda f: f["pack_qty"] > 1)) | is_bundle)]
+    parent_records = []
+    for row in parents.to_dict("records"):
+        f = row["_features"].copy()
+        if f["pack_qty"] <= 1:
+            # Bundle flag is evidence of a bundle, but do not invent a conversion.
+            continue
+        row["features"] = f
+        parent_records.append(row)
     out, combos = [], []
     for r in d.to_dict("records"):
-        ct, cs = toks(r["Item Name"])
-        if not ct:
+        neg_bc = str(r.get("bc", "")).strip()
+        neg_name = str(r.get("Item Name", "") or "")
+        neg_feat = _match_features(neg_name, r.get("Pack Qty"), r.get("Packing"))
+        if not neg_feat["tokens"]:
             continue
-        best, bs, seen = None, 0.0, set()
-        for w in ct:
-            for i in inv.get(w, []):
-                if i in seen:
-                    continue
-                seen.add(i)
-                p = P[i]
-                if p[0] == r["bc"]:
-                    continue
-                if cs and p[5] and not (cs & p[5]):
-                    continue
-                ov = len(ct & p[4]) / len(ct)
-                if ov > bs:
-                    bs, best = ov, p
-        if best and bs >= threshold:
-            if skip_combo and (is_combo(best[1]) or is_combo(r["Item Name"])):
-                combos.append(dict(
-                    neg_bc=r["bc"], neg_desc=r["Item Name"], neg_qty=r["qty"],
-                    neg_val=r["val"], par_bc=best[0], par_desc=best[1],
-                    why="combo pack — breaking it releases more than one item"))
+        if skip_combo and neg_feat["is_combo"]:
+            combos.append({"neg_bc":neg_bc,"neg_desc":neg_name,
+                           "neg_qty":r.get("qty",0),"neg_val":r.get("val",0),
+                           "par_bc":"","par_desc":"",
+                           "why":"combo/mixed-size item — verify manually before breaking"})
+            continue
+        ranked = []
+        for p in parent_records:
+            if p["Item Barcode"] == neg_bc or (skip_combo and p["_features"]["is_combo"]):
                 continue
-            need = math.ceil(abs(r["qty"]) / best[3])
-            out.append(dict(
-                neg_bc=r["bc"], neg_desc=r["Item Name"],
-                category=r["category"], neg_qty=r["qty"], neg_val=r["val"],
-                par_bc=best[0], par_desc=best[1], par_stock=best[2],
-                par_cost=best[6], conv=best[3], outers_needed=need,
-                covered=need <= best[2], score=round(bs, 2), kind="Bundle break",
-                own_cost=own_cost.get(r["bc"], 0.0),
-                derived_cost=round(best[6] / best[3], COST_DP),
-                cost_drift_pct=cost_drift(best[6] / best[3], r["bc"],
-                                          own_pair),
-            ))
+            score, token_j, contain = _match_score(
+                {"features":neg_feat, **r}, {"features":p["_features"], **p})
+            if neg_feat["sizes"] and p["_features"]["sizes"] and not (neg_feat["sizes"] & p["_features"]["sizes"]):
+                continue
+            if token_j < max(0.12, threshold - 0.25) and contain < 0.45:
+                continue
+            ranked.append((score, token_j, p))
+        ranked.sort(key=lambda x: (x[0], x[1], x[2]["stock"]), reverse=True)
+        chosen = None
+        for score, token_j, p in ranked[:30]:
+            conv = p["_features"]["pack_qty"]
+            if conv <= 1:
+                continue
+            need = math.ceil(abs(float(r.get("qty",0) or 0)) / conv)
+            covered = need <= float(p.get("stock",0) or 0)
+            derived = float(p.get("cost",0) or 0) / conv
+            drift = cost_drift(derived, neg_bc, own_pair)
+            # Threshold controls suggestions, not automatic truth; keep borderline
+            # candidates available as uncovered/review rows for operator review.
+            if score < max(0.20, threshold - 0.12):
+                continue
+            chosen = (score, p, conv, need, covered, derived, drift)
+            break
+        if chosen:
+            score,p,conv,need,covered,derived,drift = chosen
+            out.append({
+                "neg_bc":neg_bc,"neg_desc":neg_name,"category":r.get("category",""),
+                "neg_qty":r.get("qty",0),"neg_val":r.get("val",0),
+                "par_bc":p["Item Barcode"],"par_desc":p["Item Name"],
+                "par_stock":p["stock"],"par_cost":p["cost"],"conv":conv,
+                "outers_needed":need,"covered":covered,"score":round(score,3),
+                "kind":"Bundle break","own_cost":own_cost.get(neg_bc,0.0),
+                "derived_cost":round(derived,COST_DP),"cost_drift_pct":drift,
+                "why_match":"token/size/metadata evidence; review conversion and pack size"
+            })
     return pd.DataFrame(out), pd.DataFrame(combos)
-
 
 @st.cache_data(show_spinner=False)
 def find_swaps(m: pd.DataFrame, d: pd.DataFrame, lo: float, hi: float,
                price_tol: float) -> pd.DataFrame:
-    mm = m.copy()
-    mm["isml"] = mm["Item Name"].astype(str).str.upper().map(
-        lambda x: bool(MULT.search(x)))
+    mm = _prepare_master(m)
     own_cost = dict(zip(mm["Item Barcode"], mm["cost"]))
     own_pair = dict(zip(mm["Item Barcode"], zip(mm["last_cost"], mm["wac"])))
-    pos = mm[(mm["stock"] > 0) & (~mm["isml"])]
-    P, inv = [], defaultdict(list)
-    for r in pos[["Item Barcode", "Item Name", "stock", "mrp", "cost"]].to_dict("records"):
-        t, sz = toks(r["Item Name"])
-        P.append((r["Item Barcode"], r["Item Name"], r["stock"], r["mrp"],
-                  t, sz, r["cost"]))
-        for w in t:
-            inv[w].append(len(P) - 1)
-
+    # Single-item candidates only. Pack-like items are not wrong-sale substitutes.
+    singles = mm[(mm["stock"] > 0) & mm["_active"] &
+                 (mm["_features"].map(lambda f: f["pack_qty"] <= 1))]
+    records = []
+    for row in singles.to_dict("records"):
+        row["features"] = row["_features"]
+        records.append(row)
     out = []
     for r in d.to_dict("records"):
-        ct, cs = toks(r["Item Name"])
-        if len(ct) < 3:
+        neg_bc = str(r.get("bc", "")).strip()
+        neg_name = str(r.get("Item Name", "") or "")
+        neg_feat = _match_features(neg_name, r.get("Pack Qty"), r.get("Packing"))
+        if len(neg_feat["tokens"]) < 2:
             continue
-        best, bs, seen = None, 0.0, set()
-        for w in ct:
-            for i in inv.get(w, []):
-                if i in seen:
-                    continue
-                seen.add(i)
-                p = P[i]
-                if p[0] == r["bc"]:
-                    continue
-                if cs and p[5] and not (cs & p[5]):
-                    continue
-                ov = len(ct & p[4]) / max(len(ct | p[4]), 1)
-                if ov < lo or ov > hi:
-                    continue
-                sp = r.get("sp")
-                if sp and p[3] and abs(sp - p[3]) / max(sp, 0.01) > price_tol:
-                    continue
-                if p[2] < abs(r["qty"]):
-                    continue
-                if ov > bs:
-                    bs, best = ov, p
-        if best:
-            out.append(dict(
-                neg_bc=r["bc"], neg_desc=r["Item Name"], category=r["category"],
-                neg_qty=r["qty"], neg_val=r["val"], par_bc=best[0], par_desc=best[1],
-                par_stock=best[2], par_cost=best[6], conv=1,
-                outers_needed=abs(r["qty"]), covered=True,
-                score=round(bs, 2), kind="Wrong sale",
-                own_cost=own_cost.get(r["bc"], 0.0),
-                derived_cost=round(best[6], COST_DP),
-                cost_drift_pct=cost_drift(best[6], r["bc"], own_pair),
-            ))
+        ranked = []
+        for p in records:
+            if p["Item Barcode"] == neg_bc:
+                continue
+            score, token_j, contain = _match_score(
+                {"features":neg_feat, **r}, {"features":p["_features"], **p})
+            if neg_feat["sizes"] and p["_features"]["sizes"] and not (neg_feat["sizes"] & p["_features"]["sizes"]):
+                continue
+            # Keep the legacy overlap band as a weak guard, not as sole ranking.
+            if token_j < max(0.08, lo - 0.10) or token_j > min(1.0, hi + 0.30):
+                continue
+            sp = r.get("sp")
+            try:
+                sp = float(sp)
+            except (TypeError, ValueError):
+                sp = 0.0
+            mrp = float(p.get("mrp",0) or 0)
+            if sp > 0 and mrp > 0 and abs(sp-mrp)/max(sp,0.01) > price_tol:
+                continue
+            if float(p.get("stock",0) or 0) < abs(float(r.get("qty",0) or 0)):
+                continue
+            if contain < 0.5 and score < 0.34:
+                continue
+            ranked.append((score, token_j, contain, p))
+        ranked.sort(key=lambda x:(x[0],x[2],x[1]),reverse=True)
+        if not ranked:
+            continue
+        score,token_j,contain,best = ranked[0]
+        derived = float(best.get("cost",0) or 0)
+        out.append({
+            "neg_bc":neg_bc,"neg_desc":neg_name,"category":r.get("category",""),
+            "neg_qty":r.get("qty",0),"neg_val":r.get("val",0),
+            "par_bc":best["Item Barcode"],"par_desc":best["Item Name"],
+            "par_stock":best["stock"],"par_cost":derived,"conv":1,
+            "outers_needed":abs(float(r.get("qty",0) or 0)),"covered":True,
+            "score":round(score,3),"kind":"Wrong sale",
+            "own_cost":own_cost.get(neg_bc,0.0),"derived_cost":round(derived,COST_DP),
+            "cost_drift_pct":cost_drift(derived,neg_bc,own_pair),
+            "why_match":"ranked by description overlap, size, brand/class/group and price; verify barcode"
+        })
     return pd.DataFrame(out)
 
 
