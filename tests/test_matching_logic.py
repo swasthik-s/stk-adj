@@ -34,14 +34,14 @@ def _load_matcher():
 
 def _master(rows):
     defaults = {
-        "Item No": "", "Stock": 0, "Cost": 0, "WAC": 0, "Net MRP": 0,
+        "Item No": "", "stock": 0, "last_cost": 0, "wac": 0, "mrp": 0,
         "Is Active": "Checked", "Class": "GROCERY", "Category": "SUPERMARKET",
         "Group": "DRINKS", "Brand": "TEST", "Pack Qty": 0, "Packing": "",
         "IsBundleItem": "",
     }
-    return pd.DataFrame([{**defaults, **r} for r in rows]).rename(columns={
-        "Stock": "stock", "Cost": "last_cost", "WAC": "wac", "Net MRP": "mrp"
-    }).assign(cost=lambda df: df[["last_cost", "wac"]].max(axis=1))
+    return pd.DataFrame([{**defaults, **r} for r in rows]).assign(
+        cost=lambda df: df[["last_cost", "wac"]].max(axis=1)
+    )
 
 
 def _negative(barcode, name, qty=-6, **extra):
@@ -53,9 +53,9 @@ def test_pack_parent_is_matched_and_conversion_is_explicit():
     ns = _load_matcher()
     master = _master([
         {"Item Barcode": "100", "Item Name": "TEST COLA 330ML 6 PACK",
-         "stock": 10, "Cost": 12, "WAC": 12, "Net MRP": 15, "Pack Qty": 6},
+         "stock": 10, "last_cost": 12, "wac": 12, "mrp": 15, "Pack Qty": 6},
         {"Item Barcode": "200", "Item Name": "TEST COLA 330ML",
-         "stock": 0, "Cost": 2, "WAC": 2, "Net MRP": 2.5},
+         "stock": 0, "last_cost": 2, "wac": 2, "mrp": 2.5},
     ])
     breaks, combos = ns["find_breaks"](master, pd.DataFrame([_negative("200", "TEST COLA 330ML")]), 0.35)
     assert combos.empty
@@ -70,9 +70,9 @@ def test_size_conflict_does_not_match_different_product_size():
     ns = _load_matcher()
     master = _master([
         {"Item Barcode": "100", "Item Name": "TEST COLA 330ML 6 PACK",
-         "stock": 10, "Cost": 12, "WAC": 12, "Net MRP": 15, "Pack Qty": 6},
+         "stock": 10, "last_cost": 12, "wac": 12, "mrp": 15, "Pack Qty": 6},
         {"Item Barcode": "200", "Item Name": "TEST COLA 500ML",
-         "stock": 0, "Cost": 2, "WAC": 2, "Net MRP": 2.5},
+         "stock": 0, "last_cost": 2, "wac": 2, "mrp": 2.5},
     ])
     breaks, _ = ns["find_breaks"](master, pd.DataFrame([_negative("200", "TEST COLA 500ML")]), 0.35)
     assert breaks.empty
@@ -96,9 +96,9 @@ def test_wrong_sale_candidate_uses_stock_and_size_guard():
     ns = _load_matcher()
     master = _master([
         {"Item Barcode": "100", "Item Name": "TEST COLA 330ML",
-         "stock": 50, "Cost": 2, "WAC": 2, "Net MRP": 2.5},
+         "stock": 50, "last_cost": 2, "wac": 2, "mrp": 2.5},
         {"Item Barcode": "101", "Item Name": "TEST COLA 500ML",
-         "stock": 50, "Cost": 3, "WAC": 3, "Net MRP": 3.5},
+         "stock": 50, "last_cost": 3, "wac": 3, "mrp": 3.5},
         {"Item Barcode": "200", "Item Name": "OTHER ITEM 330ML",
          "stock": 0, "Cost": 2, "WAC": 2, "Net MRP": 2.5},
     ])
