@@ -1,34 +1,30 @@
-# Matching v2: test and rollout plan
+# Matching v3: validation and rollout
 
-## What changed
+The conservative matcher is now integrated into main through views/negative_stock.py and matching_engine.py.
 
-- Uses description tokens plus normalized size features, explicit pack quantity, and Brand/Class/Group as ranking evidence.
-- Imports the master-list fields Pack Qty, Packing, and IsBundleItem when present.
-- Rejects a candidate when both descriptions contain a size and those sizes conflict.
-- Requires positive stock and an active item for parent/swap candidates.
-- Uses explicit pack quantity for bundle conversion; it does not infer a conversion from generic words such as box or offer.
-- Flags mixed-size/combo descriptions for manual review instead of suggesting a one-target bundle break.
-- Adds a why_match explanation to suggested rows. Similarity is a candidate-ranking signal, not proof that two barcodes are interchangeable.
+## Local validation against the supplied reports
 
-## Run tests
+- Master list: 102,652 item rows.
+- Negative-stock report: 1,565 negative rows.
+- Focused regression tests: 8 passed locally.
+- Candidate smoke test: 68 bundle-break suggestions, 139 manual-review rows, and 18 wrong-sale suggestions.
 
-From the repository root:
+These are candidate counts, not accuracy scores. The reports do not contain verified labels for every negative line, so precision and recall cannot be calculated without an operator-reviewed ground-truth sample.
 
-\`\`\`bash
-pip install pandas pytest
-pytest -q
-\`\`\`
+## Safety rules
 
-These focused tests extract the matching section without importing/running the Streamlit page.
+- A shared word alone cannot create a match.
+- Candidate class/department must agree; conflicting size, apparel size, model code, brand, or known variant terms are rejected.
+- Explicit pack quantity is preferred. A metadata-only Pack Qty requires an exact normalized description and corroborating unit-cost ratio.
+- A description pack quantity that conflicts with master Pack Qty is rejected.
+- Weighed KG negatives, sets, mixed-size combos, and negatives that are already multipacks are sent to manual review or skipped rather than converted blindly.
+- Wrong-sale matching uses stricter name overlap, stock, class, size, brand, variant, and selling-price checks.
+- Suggestions never post adjustments automatically; staff must verify the barcode and conversion.
 
-## Before merging to main
+## Run regression tests
 
-1. Run the test suite and fix any failures.
-2. Test with a copy of the real ItemSearchList.csv and NegativeStockCategorywise.xlsx.
-3. Manually review a sample of bundle-break and wrong-sale suggestions, including wrong-size products, bundle products, inactive products, and low-stock parents.
-4. Compare precision (correct suggestions / suggestions reviewed) and recall (known correct cases found / known correct cases) against the current version.
-5. Do not automatically post adjustments from a fuzzy match. Keep the operator's confirmation step.
+From the repository root, run pytest -q. GitHub Actions is configured to run the same test suite on relevant pushes and pull requests.
 
-## Deployment
+## Deployment note
 
-A branch commit does not update Streamlit if the app deployment is configured to track main. After validation, merge this branch into the configured deployment branch or explicitly change the Streamlit app's branch setting. Confirm the configured branch in Streamlit Cloud before assuming the live app has changed.
+The matching update is on main. Streamlit Community Cloud will use it only if the app's configured deployment branch is main; check the app's deployment settings and logs to confirm the live deployment succeeded.
