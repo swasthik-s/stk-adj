@@ -1709,9 +1709,10 @@ def candidates_tab(neg, master, master_idx, neg_map,
 
     c1, c2 = st.columns([3, 2])
     picked = c1.multiselect(
-        "Categories — pick one at a time", [label[c] for c in cats], default=[],
-        help="Choose the sections to list. Every negative-stock line in the "
-             "selected sections will appear, whether a match is found or not.")
+        "Categories to include", [label[c] for c in cats],
+        default=[label[c] for c in cats],
+        help="All categories are selected by default. Every negative-stock line "
+             "in the selected sections will appear, whether a match is found or not.")
     pick_cats = [c for c in cats if label[c] in picked]
     no_break_cats = c2.multiselect(
         "No bundle breaks in these categories", cats,
@@ -1724,7 +1725,7 @@ def candidates_tab(neg, master, master_idx, neg_map,
         st.info("Negative-stock lines can be listed without the masterlist, "
                 "but matching suggestions require it.")
     if not pick_cats:
-        st.info("Choose a category above to load its full list.")
+        st.info("Select categories and click Load full candidate list.")
 
     if run and pick_cats:
         d = neg[neg["category"].isin(pick_cats)].copy()
