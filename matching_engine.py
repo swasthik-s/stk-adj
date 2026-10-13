@@ -235,14 +235,22 @@ def find_breaks(master,negatives,threshold,skip_combo=True):
                 if nf["tokens"]!=pf["tokens"] or _similarity(nf["tokens"],pf["tokens"])[3]<0.98: continue
             elif ratio is not None and ratio>0.65: continue
             qty=abs(_num(r.get("qty"))); conv=int(conv); need=math.ceil(qty/conv)
-            if need>float(p["stock"]): continue
+            available=float(p["stock"])
+            if need>available: continue
+            # Clear the negative first, then use up to three additional outer
+            # packs when they are physically available. Keep the total in
+            # outers, because this is the quantity staff must break.
+            spare=max(0, math.floor(available)-need)
+            extra=min(3, spare)
+            break_count=need+extra
             score,why_score,_,_=_score(nf,pf,nclass,p["_class"],nbrand,p["_brand"],ngroup,p["_group"])
             if score<max(0.62,float(threshold)): continue
             own_pair=own.get(bc,(0,0,0)); derived=float(p["cost"])/conv
             out.append({"neg_bc":bc,"neg_desc":name,"category":r.get("category",""),
                 "neg_qty":r.get("qty",0),"neg_val":r.get("val",0),"par_bc":p["Item Barcode"],
                 "par_desc":p["Item Name"],"par_stock":p["stock"],"par_cost":p["cost"],
-                "conv":conv,"outers_needed":need,"covered":True,"score":score,"kind":"Bundle break",
+                "conv":conv,"outers_needed":break_count,"required_outers":need,
+                "extra_outers":extra,"covered":True,"score":score,"kind":"Bundle break",
                 "own_cost":own_pair[2],"derived_cost":round(derived,7),
                 "cost_drift_pct":_cost_drift(derived,own_pair[:2]),
                 "why_match":why_score+("; explicit pack quantity" if explicit else "; metadata pack qty plus unit-cost corroboration")})
