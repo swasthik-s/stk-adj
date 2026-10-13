@@ -429,33 +429,42 @@ def duplicate_barcodes(master: pd.DataFrame) -> pd.DataFrame:
 
 
 def cost_drift(derived, code, own_pair):
-    """How far the derive# ==================== matching v3 ====================
-# The standalone engine is unit-tested independently. Similarity only proposes
-# candidates; pack metadata, stock, class, size, price, and human review remain
-# part of the adjustment workflow.
+    """Compare derived single-item cost with the closer of last cost and WAC."""
+    try:
+        derived = float(derived)
+    except (TypeError, ValueError):
+        return None
+    if not derived:
+        return None
+    costs = []
+    for value in own_pair.get(code, ()):
+        try:
+            value = float(value)
+        except (TypeError, ValueError):
+            continue
+        if value > 0:
+            costs.append(value)
+    if not costs:
+        return None
+    return round(min(((derived - value) / value * 100 for value in costs), key=abs), 1)
+
+
+# ==================== matching v3 ====================
+# Similarity proposes candidates; adjustment output still requires review.
 from matching_engine import find_breaks as _find_breaks_v3
 from matching_engine import find_swaps as _find_swaps_v3
+
 
 @st.cache_data(show_spinner=False)
 def find_breaks(m: pd.DataFrame, d: pd.DataFrame, threshold: float,
                 skip_combo: bool = True):
     return _find_breaks_v3(m, d, threshold, skip_combo)
 
+
 @st.cache_data(show_spinner=False)
 def find_swaps(m: pd.DataFrame, d: pd.DataFrame, lo: float, hi: float,
                price_tol: float) -> pd.DataFrame:
     return _find_swaps_v3(m, d, lo, hi, price_tol)
-
-
-         "par_bc":best["Item Barcode"],"par_desc":best["Item Name"],
-            "par_stock":best["stock"],"par_cost":derived,"conv":1,
-            "outers_needed":abs(float(r.get("qty",0) or 0)),"covered":True,
-            "score":round(score,3),"kind":"Wrong sale",
-            "own_cost":own_cost.get(neg_bc,0.0),"derived_cost":round(derived,COST_DP),
-            "cost_drift_pct":cost_drift(derived,neg_bc,own_pair),
-            "why_match":"ranked by description overlap, size, brand/class/group and price; verify barcode"
-        })
-    return pd.DataFrame(out)
 
 
 # ==================== sheet writer ====================
