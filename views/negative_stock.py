@@ -1773,7 +1773,8 @@ def candidates_tab(neg, master, master_idx, neg_map,
                         "par_bc": "", "par_desc": "", "par_stock": 0, "par_cost": 0,
                         "conv": 1, "outers_needed": 0, "cost_drift_pct": None,
                         "score": None, "kind": "Manual review", "why_match": reason,
-                        "problems": reason, "match_status": "Manual review", "use": False,
+                        "problems": reason, "match_status": "Manual review",
+                        "eligible_match": False, "use": False,
                     }
                 else:
                     row = {
@@ -1784,7 +1785,7 @@ def candidates_tab(neg, master, master_idx, neg_map,
                         "conv": 1, "outers_needed": 0, "cost_drift_pct": None,
                         "score": None, "kind": "No match", "why_match": "",
                         "problems": "No bundle-break or wrong-sale candidate found",
-                        "match_status": "No match", "use": False,
+                        "match_status": "No match", "eligible_match": False, "use": False,
                     }
                 rows.append(row)
                 continue
@@ -1798,9 +1799,11 @@ def candidates_tab(neg, master, master_idx, neg_map,
                      if not (x.startswith("over-clears") or x.startswith("under-clears"))]
             if fatal:
                 row["match_status"] = "Needs review"
+                row["eligible_match"] = False
                 row["use"] = False
             else:
                 row["match_status"] = row.get("kind", "Matched")
+                row["eligible_match"] = True
                 row["use"] = True
             rows.append(row)
 
@@ -1835,6 +1838,8 @@ def candidates_tab(neg, master, master_idx, neg_map,
             cand["match_status"] = cand.get("kind", "Unknown")
         if "use" not in cand:
             cand["use"] = cand.get("par_bc", pd.Series("", index=cand.index)).astype(str).str.strip().ne("")
+        if "eligible_match" not in cand:
+            cand["eligible_match"] = cand["use"].fillna(False).astype(bool)
         for col, default in (("par_bc", ""), ("par_desc", ""), ("problems", ""),
                              ("why_match", ""), ("kind", "No match"), ("neg_bc", ""),
                              ("neg_desc", ""), ("neg_qty", 0), ("neg_val", 0),
@@ -1859,7 +1864,7 @@ def candidates_tab(neg, master, master_idx, neg_map,
         q2.caption("No-match and review rows remain in the list but are never "
                    "selected for Build sheets.")
         has_source = cand["par_bc"].fillna("").astype(str).str.strip().ne("")
-        cand["use"] = cand["use"].fillna(False).astype(bool) & has_source & (vals >= thresh)
+        cand["use"] = cand["eligible_match"].fillna(False).astype(bool) & has_source & (vals >= thresh)
         st.session_state["cand"] = cand
 
         picked_vals = vals[cand["use"]]
@@ -1995,8 +2000,11 @@ with tabV:
                              key="passed_codes")
         t2.write("")
         if t2.button("All of them", width="stretch"):
-            st.session_state["passed_codes"] = "\n".join(
-                cand["neg_bc"].astype(str))
+            usable_codes = cand.loc[
+                cand.get("eligible_match", cand["use"]).fillna(False).astype(bool)
+                & cand["par_bc"].fillna("").astype(str).str.strip().ne(""),
+                "neg_bc"].astype(str)
+            st.session_state["passed_codes"] = "\n".join(usable_codes)
             st.rerun()
         if t2.button("Clear", width="stretch"):
             st.session_state["passed_codes"] = ""
