@@ -1700,6 +1700,7 @@ with tab1:
 @st.fragment
 def candidates_tab(neg, master, master_idx, neg_map,
                    br_thresh, sw_lo, sw_hi, price_tol, drift_tol):
+    """Show every selected negative-stock line, including unmatched items."""
     counts = (neg.groupby("category")
               .agg(lines=("val", "size"), val=("val", "sum")))
     cats = sorted(neg["category"].dropna().unique())
@@ -1709,183 +1710,205 @@ def candidates_tab(neg, master, master_idx, neg_map,
     c1, c2 = st.columns([3, 2])
     picked = c1.multiselect(
         "Categories — pick one at a time", [label[c] for c in cats], default=[],
-        help="Nothing runs until you choose. One section at a time keeps the "
-             "list short and the matches easier to check.")
+        help="Choose the sections to list. Every negative-stock line in the "
+             "selected sections will appear, whether a match is found or not.")
     pick_cats = [c for c in cats if label[c] in picked]
-    mode = c2.selectbox("What to look for",
-                        ["Bundle breaks only", "Wrong sales only", "Both"],
-                        index=0)
-    c3, c4 = st.columns([3, 2])
-    no_break_cats = c3.multiselect(
+    no_break_cats = c2.multiselect(
         "No bundle breaks in these categories", cats,
         default=[c for c in cats if c == "GARMENTS"],
-        help="Garments are wrong-sale only")
-    c4.write("")
-    run = c4.button("Run matching", type="primary", width="stretch",
-                    disabled=not pick_cats or len(master) == 0)
+        help="These categories are still checked for wrong sales, but not bundle breaks.")
+    run_col, _ = st.columns([1, 4])
+    run = run_col.button("Load full candidate list", type="primary",
+                         width="stretch", disabled=not pick_cats)
     if len(master) == 0:
-        st.info("Matching needs the masterlist — add it in the Data tile. "
-                "The pairs from the saved session are shown below.")
+        st.info("Negative-stock lines can be listed without the masterlist, "
+                "but matching suggestions require it.")
     if not pick_cats:
-        st.info("Choose a category above to start.")
+        st.info("Choose a category above to load its full list.")
 
     if run and pick_cats:
-        d = neg[neg["category"].isin(pick_cats)]
-        parts, combos = [], pd.DataFrame()
-        with st.status("Matching…", expanded=False) as status:
-            if mode in ("Bundle breaks only", "Both"):
+        d = neg[neg["category"].isin(pick_cats)].copy()
+        breaks, combos = pd.DataFrame(), pd.DataFrame()
+        swaps = pd.DataFrame()
+        if len(master):
+            with st.status("Checking every negative-stock line…",
+                           expanded=False) as status:
                 status.update(label="Looking for bundle breaks…")
-                b, combos = find_breaks(
+                breaks, combos = find_breaks(
                     master, d[~d["category"].isin(no_break_cats)], br_thresh)
-                if len(b):
-                    parts.append(b[b["covered"]])
-            if mode in ("Wrong sales only", "Both"):
                 status.update(label="Looking for wrong sales…")
-                sw = find_swaps(master, d, sw_lo, sw_hi, price_tol)
-                if len(sw):
-                    parts.append(sw)
-            status.update(label="Checking costs and stock…")
-        if parts:
-            cand = pd.concat(parts, ignore_index=True)
-            cand = cand.drop_duplicates("neg_bc", keep="first")
-            cand["abs_val"] = cand["neg_val"].abs()
+                swaps = find_swaps(master, d, sw_lo, sw_hi, price_tol)
+                status.update(label="Building the full list…")
+        else:
+            st.warning("No masterlist loaded; all listed lines will be marked No match.")
+
+        # Keep one suggested pair per negative barcode. Bundle breaks take
+        # precedence over wrong-sale suggestions; unmatched lines stay visible.
+        suggestions = {}
+        for frame in (breaks, swaps):
+            if frame is None or frame.empty:
+                continue
+            for rec in frame.to_dict("records"):
+                bc = str(rec.get("neg_bc", "")).strip()
+                if bc and bc not in suggestions:
+                    suggestions[bc] = rec
+
+        combo_map = {}
+        if combos is not None and not combos.empty:
+            for rec in combos.to_dict("records"):
+                combo_map.setdefault(str(rec.get("neg_bc", "")).strip(), rec)
+
+        rows = []
+        for source in d.to_dict("records"):
+            bc = str(source.get("bc", "")).strip()
+            rec = suggestions.get(bc)
+            if rec is None:
+                combo = combo_map.get(bc)
+                if combo:
+                    reason = combo.get("why", "Manual review required")
+                    row = {
+                        "neg_bc": bc, "neg_desc": source.get("Item Name", ""),
+                        "category": source.get("category", ""),
+                        "neg_qty": source.get("qty", 0), "neg_val": source.get("val", 0),
+                        "par_bc": "", "par_desc": "", "par_stock": 0, "par_cost": 0,
+                        "conv": 1, "outers_needed": 0, "cost_drift_pct": None,
+                        "score": None, "kind": "Manual review", "why_match": reason,
+                        "problems": reason, "match_status": "Manual review", "use": False,
+                    }
+                else:
+                    row = {
+                        "neg_bc": bc, "neg_desc": source.get("Item Name", ""),
+                        "category": source.get("category", ""),
+                        "neg_qty": source.get("qty", 0), "neg_val": source.get("val", 0),
+                        "par_bc": "", "par_desc": "", "par_stock": 0, "par_cost": 0,
+                        "conv": 1, "outers_needed": 0, "cost_drift_pct": None,
+                        "score": None, "kind": "No match", "why_match": "",
+                        "problems": "No bundle-break or wrong-sale candidate found",
+                        "match_status": "No match", "use": False,
+                    }
+                rows.append(row)
+                continue
+
+            row = dict(rec)
+            row.setdefault("category", source.get("category", ""))
+            probs = validate(row, master_idx, neg_map, drift_tol) if len(master) else [
+                "masterlist unavailable"]
+            row["problems"] = "; ".join(probs)
+            fatal = [x for x in probs
+                     if not (x.startswith("over-clears") or x.startswith("under-clears"))]
+            if fatal:
+                row["match_status"] = "Needs review"
+                row["use"] = False
+            else:
+                row["match_status"] = row.get("kind", "Matched")
+                row["use"] = True
+            rows.append(row)
+
+        cand = pd.DataFrame(rows)
+        if not cand.empty:
+            cand["abs_val"] = pd.to_numeric(cand["neg_val"], errors="coerce").abs()
             cand = (cand.sort_values("abs_val", ascending=False)
                     .drop(columns="abs_val").reset_index(drop=True))
-            probs = [validate(r, master_idx, neg_map, drift_tol)
-                     for r in cand.to_dict("records")]
-            cand["problems"] = ["; ".join(p) for p in probs]
-            # A pair either survives the checks or it is dropped here. Nothing
-            # downstream re-decides, so every screen shows the same list.
-            # Over/under-clear is normal odd-quantity overshoot, not a fault.
-            fatal = [[x for x in p
-                      if not (x.startswith("over-clears")
-                              or x.startswith("under-clears"))] for p in probs]
-            dropped = cand[[bool(f) for f in fatal]].copy()
-            dropped["why"] = ["; ".join(f) for f in fatal if f]
-            cand = cand[[not f for f in fatal]].reset_index(drop=True)
-            cand["use"] = True
-            st.session_state["dropped"] = dropped
-            st.session_state["cand"] = cand
-            st.session_state["combos"] = combos
-            st.session_state["batch"] = 0
-            st.session_state["sel_version"] = st.session_state.get(
-                "sel_version", 0) + 1
-            store = get_store()
-            if (store is not None and st.session_state.get("session_id")
-                    and hasattr(store, "update_session")):
-                store.update_session(st.session_state["session_id"],
-                                     cand_df=cand)
-            if store is not None and APP.get("save_runs", True):
-                okr, rid = store.save_run(
-                    categories=pick_cats, mode=mode,
-                    settings={"break_threshold": br_thresh,
-                              "swap_window": [sw_lo, sw_hi],
-                              "price_tol": price_tol, "drift_tol": drift_tol},
-                    candidates_df=cand, combos_df=combos)
-                if okr:
-                    st.session_state["run_id"] = rid
-            status.update(label=f"{len(cand)} candidates", state="complete")
-        else:
-            status.update(label="No candidates", state="complete")
-            st.session_state["cand"] = pd.DataFrame()
-            st.session_state["combos"] = combos
-        st.rerun()               # one reload so Verify and Build see the result
+        st.session_state["cand"] = cand
+        st.session_state["combos"] = combos
+        st.session_state["dropped"] = pd.DataFrame()
+        st.session_state["batch"] = 0
+        st.session_state["sel_version"] = st.session_state.get("sel_version", 0) + 1
+        store = get_store()
+        if (store is not None and st.session_state.get("session_id")
+                and hasattr(store, "update_session")):
+            store.update_session(st.session_state["session_id"], cand_df=cand)
+        if store is not None and APP.get("save_runs", True):
+            okr, rid = store.save_run(
+                categories=pick_cats, mode="All lines",
+                settings={"break_threshold": br_thresh,
+                          "swap_window": [sw_lo, sw_hi],
+                          "price_tol": price_tol, "drift_tol": drift_tol},
+                candidates_df=cand, combos_df=combos)
+            if okr:
+                st.session_state["run_id"] = rid
+        st.rerun()
 
     cand = st.session_state.get("cand")
-    combos = st.session_state.get("combos")
-
-    if combos is not None and len(combos):
-        with st.expander(f":material/warning: {len(combos)} combo packs skipped "
-                         f"({combos['neg_val'].sum():,.0f} AED) — do these by hand"):
-            st.caption("A combo holds two different items, e.g. 100ML + 50ML. "
-                       "Breaking one releases both, so it needs two target lines. "
-                       "Use the Manual pair tab for these.")
-            st.dataframe(combos, width="stretch", hide_index=True)
-
     if cand is not None and len(cand):
+        if "match_status" not in cand:
+            cand["match_status"] = cand.get("kind", "Unknown")
+        if "use" not in cand:
+            cand["use"] = cand.get("par_bc", pd.Series("", index=cand.index)).astype(str).str.strip().ne("")
+        for col, default in (("par_bc", ""), ("par_desc", ""), ("problems", ""),
+                             ("why_match", ""), ("kind", "No match"), ("neg_bc", ""),
+                             ("neg_desc", ""), ("neg_qty", 0), ("neg_val", 0),
+                             ("conv", 1), ("outers_needed", 0), ("cost_drift_pct", None)):
+            if col not in cand:
+                cand[col] = default
+
         m1, m2, m3, m4 = st.columns(4)
-        m1.metric("Candidates", len(cand))
-        m2.metric("Value covered", f"{cand['neg_val'].sum():,.0f} AED")
-        m3.metric("Dropped by checks",
-                  len(st.session_state.get("dropped", [])))
-        m4.metric("Ticked", int(cand["use"].sum()))
+        m1.metric("Negative lines listed", len(cand))
+        m2.metric("Usable matches", int(cand["use"].sum()))
+        m3.metric("No match", int(cand["match_status"].eq("No match").sum()))
+        m4.metric("Needs review", int(cand["match_status"].isin(
+            ["Needs review", "Manual review"]).sum()))
 
-        vals = cand["neg_val"].abs()
+        vals = pd.to_numeric(cand["neg_val"], errors="coerce").abs()
         vmax = float(vals.max()) if len(vals) else 0.0
-
-        # Selection is computed from these controls every run — no widget holds
-        # a stale copy of the ticks, so what you see is always what will build.
         q1, q2 = st.columns([2, 2])
         thresh = q1.number_input(
-            "Only take pairs worth at least (AED)", min_value=0.0,
+            "Minimum value for selected matches (AED)", min_value=0.0,
             max_value=max(vmax, 1.0), value=0.0, step=5.0, key="thresh",
-            help="0 takes every pair. Raise it to skip the small ones.")
-        q2.caption("Pairs that failed the cost, stock or barcode checks were "
-                   "dropped when matching ran — they are not in this list.")
-        eligible = cand[cand["neg_val"].abs() >= thresh]
-
-        cand["use"] = cand.index.isin(eligible.index)
+            help="This only affects matched rows. Unmatched lines remain visible.")
+        q2.caption("No-match and review rows remain in the list but are never "
+                   "selected for Build sheets.")
+        has_source = cand["par_bc"].fillna("").astype(str).str.strip().ne("")
+        cand["use"] = cand["use"].fillna(False).astype(bool) & has_source & (vals >= thresh)
         st.session_state["cand"] = cand
 
-        picked = cand.loc[cand["use"], "neg_val"].abs()
+        picked_vals = vals[cand["use"]]
         per = st.session_state.get("per_sheet", PAIRS_PER_FILE)
         st.success(
-            f"**{len(picked)} pairs selected**, {picked.sum():,.0f} AED — "
-            f"{math.ceil(len(picked) / max(per, 1))} sheet(s) at {per} pairs each, "
-            f"filled highest value first."
-        )
+            f"{int(cand['use'].sum())} usable pair(s) selected, {picked_vals.sum():,.0f} AED — "
+            f"{math.ceil(int(cand['use'].sum()) / max(per, 1))} sheet(s) at {per} pairs each.")
 
-        BASIC = ["neg_desc", "neg_qty", "neg_val", "par_desc", "conv",
-                 "outers_needed", "cost_drift_pct", "problems"]
-        extra_opts = [c for c in cand.columns
-                      if c not in BASIC + ["use"]]
-        show_extra = st.multiselect("Add columns", extra_opts, default=[],
-                                    key="extra_cols")
+        BASIC = ["match_status", "kind", "neg_bc", "neg_desc", "neg_qty", "neg_val",
+                 "par_bc", "par_desc", "conv", "outers_needed", "cost_drift_pct",
+                 "problems", "why_match"]
+        extra_opts = [c for c in cand.columns if c not in BASIC + ["use"]]
+        show_extra = st.multiselect("Add columns", extra_opts, default=[], key="extra_cols")
         cols = [c for c in BASIC if c in cand.columns] + show_extra
-
-        def cand_copy(df, key):
-            codes = [str(c).strip() for c in df.get("neg_bc", []) if str(c).strip()]
-            if not codes:
-                return
-            with st.expander(f"Copy barcodes ({len(codes)})"):
-                which = st.radio("Which", ["Negative item", "Outer / source",
-                                           "Both, one pair per line"],
-                                 horizontal=True, key=f"cw_{key}",
-                                 label_visibility="collapsed") or "Negative item"
-                if which == "Negative item":
-                    txt = "\n".join(str(x).strip() for x in df["neg_bc"])
-                elif which == "Outer / source":
-                    txt = "\n".join(str(x).strip() for x in df["par_bc"])
-                else:
-                    txt = "\n".join(f"{str(a).strip()},{str(b).strip()}"
-                                     for a, b in zip(df["par_bc"], df["neg_bc"]))
-                st.code(txt, language=None)
-
-        view = st.radio("Show", ["Taken", "Left out", "Everything"],
-                        horizontal=True, key="view_mode")
-        shown = (cand[cand["use"]] if view == "Taken"
-                 else cand[~cand["use"]] if view == "Left out" else cand)
+        view = st.radio("Show", ["All lines", "Usable matches", "Unmatched / review"],
+                        horizontal=True, key="view_mode", index=0)
+        if view == "Usable matches":
+            shown = cand[cand["use"]]
+        elif view == "Unmatched / review":
+            shown = cand[~cand["use"]]
+        else:
+            shown = cand
 
         st.dataframe(
             colour_money(shown[cols], ["neg_val", "neg_qty", "cost_drift_pct"]),
-            width="stretch", hide_index=True, height=380,
+            width="stretch", hide_index=True, height=480,
             column_config={
+                "match_status": st.column_config.TextColumn("Status", width="medium"),
+                "kind": st.column_config.TextColumn("Match type", width="medium"),
+                "neg_bc": st.column_config.TextColumn("Negative barcode", width="medium"),
                 "neg_desc": st.column_config.TextColumn("Negative item", width="large"),
-                "par_desc": st.column_config.TextColumn("Outer / source", width="large"),
+                "par_bc": st.column_config.TextColumn("Suggested source barcode", width="medium"),
+                "par_desc": st.column_config.TextColumn("Suggested source item", width="large"),
                 "neg_qty": st.column_config.NumberColumn("Neg qty", width="small"),
-                "neg_val": st.column_config.NumberColumn("Neg value",
-                                                         format="AED %.2f",
-                                                         width="small"),
+                "neg_val": st.column_config.NumberColumn("Neg value", format="AED %.2f", width="small"),
                 "conv": st.column_config.NumberColumn("Conv", width="small"),
                 "outers_needed": st.column_config.NumberColumn("Outers", width="small"),
-                "cost_drift_pct": st.column_config.NumberColumn(
-                    "Drift %", format="%.0f%%", width="small"),
-                "problems": st.column_config.TextColumn("Notes", width="medium"),
+                "cost_drift_pct": st.column_config.NumberColumn("Drift %", format="%.1f%%", width="small"),
+                "problems": st.column_config.TextColumn("Checks / notes", width="large"),
+                "why_match": st.column_config.TextColumn("Match explanation", width="large"),
             })
-        cand_copy(shown, "cand")
-
+        st.caption("All negative-stock lines in the selected categories are shown. "
+                   "Only validated matches with a source barcode are selected for Verify and Build sheets.")
+        codes = [str(c).strip() for c in shown.get("neg_bc", []) if str(c).strip()]
+        if codes:
+            with st.expander(f"Copy negative barcodes ({len(codes)})"):
+                st.code("\n".join(codes), language=None)
     elif cand is not None:
-        st.warning("No candidates. Loosen the sliders in the sidebar and run again.")
+        st.warning("The candidate list is empty. Select categories and load the full list.")
 
 # ---------- Verify ----------
 with tabV:
