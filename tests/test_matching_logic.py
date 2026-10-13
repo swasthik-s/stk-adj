@@ -23,6 +23,29 @@ def test_explicit_pack_match_and_conversion():
     assert combos.empty and len(out)==1
     assert out.iloc[0]["par_bc"]=="100" and out.iloc[0]["conv"]==6 and out.iloc[0]["outers_needed"]==1
 
+def test_break_count_uses_up_to_three_extra_outers_when_available():
+    m=master([
+        {"Item Barcode":"100","Item Name":"TEST COLA 330ML 6 PACK","Stock":5,"Cost":12,"WAC":12,"LP Price":15,"Pack Qty":6},
+        {"Item Barcode":"200","Item Name":"TEST COLA 330ML","Stock":0,"Cost":2,"WAC":2,"LP Price":2.5,"Pack Qty":1},
+    ])
+    out, _=find_breaks(m,pd.DataFrame([neg("200","TEST COLA 330ML",qty=-13)]),0.35)
+    assert len(out)==1
+    # 13 singles need 3 outers; only 2 extra outers are in stock.
+    assert out.iloc[0]["required_outers"]==3
+    assert out.iloc[0]["extra_outers"]==2
+    assert out.iloc[0]["outers_needed"]==5
+
+def test_break_count_does_not_exceed_available_outer_stock():
+    m=master([
+        {"Item Barcode":"100","Item Name":"TEST COLA 330ML 6 PACK","Stock":3,"Cost":12,"WAC":12,"LP Price":15,"Pack Qty":6},
+        {"Item Barcode":"200","Item Name":"TEST COLA 330ML","Stock":0,"Cost":2,"WAC":2,"LP Price":2.5,"Pack Qty":1},
+    ])
+    out, _=find_breaks(m,pd.DataFrame([neg("200","TEST COLA 330ML",qty=-13)]),0.35)
+    assert len(out)==1
+    assert out.iloc[0]["required_outers"]==3
+    assert out.iloc[0]["extra_outers"]==0
+    assert out.iloc[0]["outers_needed"]==3
+
 def test_wrong_size_is_rejected():
     m=master([
         {"Item Barcode":"100","Item Name":"TEST COLA 330ML 6 PACK","Stock":10,"Cost":12,"WAC":12,"LP Price":15,"Pack Qty":6},
