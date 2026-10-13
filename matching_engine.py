@@ -255,7 +255,7 @@ def find_breaks(master,negatives,threshold,skip_combo=True):
                 "cost_drift_pct":_cost_drift(derived,own_pair[:2]),
                 "why_match":why_score+("; explicit pack quantity" if explicit else "; metadata pack qty plus unit-cost corroboration")})
     if out:
-        out.sort(key=lambda x:(x["score"],-abs(x.get("cost_drift_pct") or 0)),reverse=True)
+        out.sort(key=lambda x:(x["score"],x.get("extra_outers",0),-abs(x.get("cost_drift_pct") or 0)),reverse=True)
         seen=set(); filtered=[]
         for row in out:
             if row["neg_bc"] in seen: continue
