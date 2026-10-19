@@ -37,8 +37,14 @@ def parse_csv(raw):
     errors = []
     for enc in ("utf-8-sig", "cp1252", "latin-1"):
         try:
-            return pd.read_csv(io.BytesIO(raw), dtype=str, encoding=enc,
-                               sep=None, engine="python", on_bad_lines="warn")
+            frame = pd.read_csv(io.BytesIO(raw), dtype=str, encoding=enc,
+                                sep=",", engine="c", on_bad_lines="warn")
+            # iTrade exports are normally comma-separated. Fall back to delimiter
+            # sniffing only when the whole header was read as one column.
+            if len(frame.columns) == 1:
+                frame = pd.read_csv(io.BytesIO(raw), dtype=str, encoding=enc,
+                                    sep=None, engine="python", on_bad_lines="warn")
+            return frame
         except Exception as exc:
             errors.append(f"{enc}: {exc}")
     raise ValueError("Unable to parse CSV: " + " | ".join(errors))
@@ -106,15 +112,17 @@ df["Below cost"] = df["Cost"].notna() & df["Selling price"].notna() & (df["Cost"
 df["Missing cost"] = df["Cost"].isna() | (df["Cost"] <= 0) if mapping["Cost"] else True
 df["Missing selling price"] = df["Selling price"].isna() | (df["Selling price"] <= 0) if mapping["Selling price"] else True
 df["Duplicate barcode"] = df["Barcode"].ne("") & df["Barcode"].duplicated(keep=False)
-def issues(row):
-    found = []
-    for col, label in [("Negative stock", "Negative stock"), ("Below cost", "Selling below cost"),
-                       ("Missing cost", "Missing / zero cost"), ("Missing selling price", "Missing / zero selling price"),
-                       ("Duplicate barcode", "Duplicate barcode")]:
-        if bool(row[col]):
-            found.append(label)
-    return "; ".join(found) if found else "No detected issue"
-df["Issues"] = df.apply(issues, axis=1)
+issue_flags = [
+    (df["Negative stock"], "Negative stock"),
+    (df["Below cost"], "Selling below cost"),
+    (df["Missing cost"], "Missing / zero cost"),
+    (df["Missing selling price"], "Missing / zero selling price"),
+    (df["Duplicate barcode"], "Duplicate barcode"),
+]
+df["Issues"] = [
+    "; ".join(label for mask, label in issue_flags if bool(mask.iloc[i])) or "No detected issue"
+    for i in range(len(df))
+]
 df["Status"] = [
     "🔴 Critical" if n or b else "🟡 Investigate" if mc or mp or dup else "🟢 Healthy"
     for n, b, mc, mp, dup in zip(df["Negative stock"], df["Below cost"], df["Missing cost"], df["Missing selling price"], df["Duplicate barcode"])
