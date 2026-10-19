@@ -36,6 +36,7 @@ except ImportError:
 HERE = Path(__file__).parent
 PAGES = [
     ("views/negative_stock.py", "Negative stock", ":material/inventory_2:", True),
+    ("views/master_audit.py", "Master Sheet Audit", ":material/analytics:", False),
     ("views/pdf_tools.py", "PDF to Excel / txt", ":material/picture_as_pdf:", False),
     ("views/templates.py", "Item templates", ":material/description:", False),
     ("views/history.py", "History", ":material/history:", False),
