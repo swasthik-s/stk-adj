@@ -16,15 +16,6 @@ import re
 import pandas as pd
 import streamlit as st
 
-# The PIN gate runs here too, not only in app.py. A page script can be reached
-# without the router having run — Streamlit's own pages/ discovery does exactly
-# that — and a gate that only guards the front door is not a gate.
-try:
-    from auth import require_pin
-    require_pin()
-except ImportError:
-    pass
-
 
 try:
     import pdfplumber
@@ -75,7 +66,7 @@ OCR_OK = OCR_ENGINE is not None
 def _rapid():
     return RapidOCR()
 
-st.title(":material/picture_as_pdf: PDF → Excel / txt")
+st.title(":material/picture_as_pdf: PDF to Excel")
 
 if not PDF_OK:
     st.error(f"pdfplumber is not installed on the server. {PDF_ERR}")
