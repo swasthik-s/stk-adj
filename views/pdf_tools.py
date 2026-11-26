@@ -68,7 +68,7 @@ def render():
     def _rapid():
         return RapidOCR()
     
-    st.title(":material/picture_as_pdf: PDF to Excel")
+    st.markdown('<div class="tool-heading"><div class="tool-icon">PDF</div><div><h2>PDF to Excel</h2><p>Extract invoice lines, tables and text from PDF documents.</p></div></div>', unsafe_allow_html=True)
     
     if not PDF_OK:
         st.error(f"pdfplumber is not installed on the server. {PDF_ERR}")
