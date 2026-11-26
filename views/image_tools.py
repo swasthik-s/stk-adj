@@ -59,7 +59,7 @@ def dataframe(rows):
     if len(first)>=2 and words>=max(2,len(first)//2):
         headers=[]; seen={}
         for i,value in enumerate(first):
-            name=re.sub(r"\\s+"," ",value).strip() or f"Column {i+1}"
+            name=re.sub(r"\s+"," ",value).strip() or f"Column {i+1}"
             seen[name]=seen.get(name,0)+1
             headers.append(name if seen[name]==1 else f"{name}_{seen[name]}")
         return pd.DataFrame(rows[1:],columns=headers)
