@@ -1,5 +1,4 @@
 """Image to Excel with local OCR and clipboard-assisted image input."""
-import base64
 import io
 import re
 from pathlib import Path
