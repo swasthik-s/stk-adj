@@ -1,4 +1,4 @@
-"Standalone image and PDF extraction tools."
+"""Standalone image and PDF extraction tools."""
 from pathlib import Path
 import streamlit as st
 
@@ -8,4 +8,7 @@ pages = [
     st.Page(root / "views" / "pdf_tools.py", title="PDF to Excel", icon=":material/picture_as_pdf:", default=True),
     st.Page(root / "views" / "image_tools.py", title="Image to Excel", icon=":material/image:"),
 ]
-st.navigation(pages, position="top").run()
+try:
+    st.navigation(pages, position="top").run()
+except TypeError:
+    st.navigation(pages).run()
