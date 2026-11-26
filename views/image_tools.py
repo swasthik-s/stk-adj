@@ -97,7 +97,7 @@ if image is not None:
                 result=engine()(np.array(image))
                 rows=visual_rows(result)
                 st.session_state["image_ocr_frame"]=dataframe(rows)
-                st.session_state["image_ocr_raw"]="\\n".join("\\t".join(r) for r in rows)
+                st.session_state["image_ocr_raw"]="\n".join("\t".join(r) for r in rows)
                 st.session_state["image_ocr_name"]=source_name
             except Exception as exc: st.error(f"OCR failed: {type(exc).__name__}: {exc}")
 frame=st.session_state.get("image_ocr_frame")
@@ -109,7 +109,7 @@ if isinstance(frame,pd.DataFrame):
     a,b,c,d=st.columns(4)
     a.download_button("Download Excel",xlsx_bytes(edited),f"{stem}.xlsx","application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",type="primary",use_container_width=True)
     b.download_button("Download CSV",edited.to_csv(index=False).encode("utf-8-sig"),f"{stem}.csv","text/csv",use_container_width=True)
-    c.download_button("Download text",edited.to_csv(index=False,sep="\\t").encode("utf-8"),f"{stem}.txt","text/plain",use_container_width=True)
+    c.download_button("Download text",edited.to_csv(index=False,sep="\t").encode("utf-8"),f"{stem}.txt","text/plain",use_container_width=True)
     d.download_button("Raw OCR text",st.session_state.get("image_ocr_raw","").encode("utf-8"),f"{stem}_raw.txt","text/plain",use_container_width=True)
 else:
     st.info("Your extracted table will appear here. OCR works best on clear, high-resolution images. Review figures before using exported data.")
