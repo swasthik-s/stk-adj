@@ -1,20 +1,14 @@
-"""PDF to Excel converter — single-page Streamlit application."""
-
+"""Standalone image and PDF extraction tools."""
 from pathlib import Path
-
 import streamlit as st
 
-st.set_page_config(
-    page_title="PDF to Excel",
-    page_icon=":material/picture_as_pdf:",
-    layout="wide",
-)
-
-# Keep the app focused on the PDF converter only.
-page = Path(__file__).parent / "views" / "pdf_tools.py"
-if not page.is_file():
-    st.error("The PDF conversion module could not be found.")
-    st.stop()
-
-exec(compile(page.read_text(encoding="utf-8"), str(page), "exec"),
-     {"__name__": "__main__", "__file__": str(page)})
+st.set_page_config(page_title="Document Converter", page_icon=":material/document_scanner:", layout="wide")
+root = Path(__file__).parent
+pages = [
+    st.Page(root / "views" / "pdf_tools.py", title="PDF to Excel", icon=":material/picture_as_pdf:", default=True),
+    st.Page(root / "views" / "image_tools.py", title="Image to Excel", icon=":material/image:"),
+]
+try:
+    st.navigation(pages, position="top").run()
+except TypeError:
+    st.navigation(pages).run()
