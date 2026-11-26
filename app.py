@@ -79,7 +79,7 @@ st.markdown(css, unsafe_allow_html=True)
 with tw.container(classes="w-full mx-auto max-w-6xl px-0"):
     tw.write("WORKSPACE", classes="text-[10px] tracking-[0.2em] font-extrabold text-purple-500 mb-3")
     tw.write("What would you like to convert?", classes="text-3xl md:text-4xl font-extrabold tracking-tight mb-2")
-    tw.write("Choose a tool to extract tables and information from your files", classes="text-sm md:text-base text-slate-500 leading-relaxed")
+    tw.write("Choose a tool to extract tables and information from your files", classes="text-sm md:text-base leading-relaxed text-slate-400" if dark else "text-sm md:text-base leading-relaxed text-slate-500")
 
 from views.pdf_tools import render as render_pdf_tools
 from views.image_tools import render as render_image_tools
