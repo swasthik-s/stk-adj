@@ -74,7 +74,7 @@ def render():
     if not PDF_OK:
         st.error(f"pdfplumber is not installed on the server. {PDF_ERR}")
         st.code("pdfplumber>=0.11", language=None)
-        st.stop()
+        return
     
     XL = ("application/vnd.openxmlformats-officedocument"
           ".spreadsheetml.sheet")
@@ -306,7 +306,7 @@ def render():
     if not ups:
         st.info("Upload one or more PDFs. Scanned pages are read automatically — "
                 "nothing to switch on.")
-        st.stop()
+        return
     
     up = ups[0] if len(ups) == 1 else None
     if up is None:
@@ -318,7 +318,7 @@ def render():
             pages, raw_tables = read_pdf(up.getvalue())
         except Exception as e:
             st.error(f"Could not read that file: {type(e).__name__}: {e}")
-            st.stop()
+            return
     
     def _ocr_boxes(img):
         """(box, text) pairs from whichever RapidOCR is installed. The new
@@ -408,7 +408,7 @@ def render():
     full = "\n".join(p["text"] for p in pages)
     if not full.strip():
         st.error("Nothing could be read from this file at all.")
-        st.stop()
+        return
     
     # Take rows from the ruled tables where they exist, and from the text for
     # anything they missed — a mixed PDF has some of each, so merging beats
