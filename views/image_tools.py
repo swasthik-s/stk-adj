@@ -98,66 +98,43 @@ def xlsx_bytes(frame):
 
 
 def render():
-    st.markdown("""
-    <style>
-      .block-container {max-width:1180px; padding-top:1.7rem; padding-bottom:3rem;}
-      .converter-heading {text-align:center; margin:0 auto 1.2rem auto;}
-      .converter-heading h1 {font-size:2rem; font-weight:650; margin:0 0 .35rem 0; color:var(--text-color);}
-      .converter-heading p {font-size:1.05rem; margin:0; color:var(--text-color); opacity:.82;}
-      div[data-testid="stFileUploader"] {max-width:100%; margin:0 auto; padding:20px 18px;
-        background:var(--secondary-background-color); border:1px solid rgba(120,120,140,.13);
-        border-radius:18px; box-shadow:0 8px 22px rgba(20,20,40,.05);}
-      div[data-testid="stFileUploader"] section {border:2px dashed #e7d2ff !important;
-        border-radius:13px !important; padding:26px 20px !important;
-        background:rgba(255,255,255,.24) !important; min-height:210px;}
-      div[data-testid="stFileUploader"] section > div {justify-content:center;}
-      div[data-testid="stFileUploader"] button {background:#8424e8 !important; color:white !important;
-        border:1px solid #8424e8 !important; border-radius:9px !important; padding:.55rem 1.5rem !important;}
-      div[data-testid="stRadio"] {max-width:460px; margin:0 auto;}
-      div[data-testid="stRadio"] > label {display:none;}
-      div[data-testid="stRadio"] [role="radiogroup"] {justify-content:center; gap:10px;}
-      div[data-testid="stRadio"] label {border:1px solid rgba(130,130,150,.22); border-radius:10px;
-        padding:8px 13px; background:var(--secondary-background-color);}
-      div[data-testid="stButton"] button {border-radius:9px;}
-      .privacy-note {font-size:.78rem; color:#9299a8; font-style:italic; margin:10px 0 18px 0;}
-      @media(max-width:640px){.converter-heading h1{font-size:1.55rem}}
-    </style>
-    <div class="converter-heading">
-      <h1>JPG To Excel</h1>
-      <p>Easily convert images to Excel in seconds with our image to Excel converter.</p>
-    </div>
-    """, unsafe_allow_html=True)
-
+    st.markdown(
+        '<div class="tool-heading"><div class="tool-icon">▧</div>'
+        '<div><h2>Image to Excel</h2><p>Extract tables from a photo, screenshot or scanned image.</p></div></div>',
+        unsafe_allow_html=True,
+    )
     if OCR_ERROR:
         st.error(f"Image OCR is unavailable: {OCR_ERROR}")
         return
 
-    left, right, spacer = st.columns([2, 1, 2])
-    with left:
+    upload_col, paste_col = st.columns([3, 1], vertical_alignment="center")
+    with upload_col:
         uploaded = st.file_uploader(
-            "Browse image", type=["jpg", "jpeg", "png", "webp", "bmp", "tif", "tiff"],
-            label_visibility="collapsed", key="image_file_upload"
+            "Drag & drop, upload or browse an image",
+            type=["jpg", "jpeg", "png", "webp", "bmp", "tif", "tiff", "gif", "jfif", "heic"],
+            key="image_file_upload",
+            help="JPG, PNG, WEBP, BMP and TIFF are supported. HEIC depends on Pillow's installed codecs.",
         )
     pasted_image = None
-    with right:
+    with paste_col:
+        st.markdown('<div class="paste-label">CLIPBOARD</div>', unsafe_allow_html=True)
         if paste_image_button:
             try:
                 pasted = paste_image_button("Paste image", key="paste_image")
                 pasted_image = getattr(pasted, "image_data", None)
             except Exception:
-                st.caption("Clipboard paste is not available in this browser.")
+                st.caption("Paste is not available in this browser.")
         else:
-            st.caption("Clipboard paste unavailable")
+            st.caption("Paste component unavailable")
 
     mode = st.radio(
-        "Extraction mode", ["Only Table", "Extract All Data"],
-        horizontal=True, captions=["Only tabular data", "Tables, headings, text"],
+        "Extraction mode",
+        ["Only Table", "Extract All Data"],
+        horizontal=True,
+        captions=["Only tabular data", "Tables, headings and text"],
         key="image_extract_mode",
     )
-    st.markdown(
-        '<div class="privacy-note">*Files are processed for conversion during this session. Check extracted values before exporting.</div>',
-        unsafe_allow_html=True
-    )
+    st.caption("Your image is processed by OCR in this app. Review extracted values before using them.")
 
     image = None
     source_name = "pasted_image"
@@ -171,34 +148,48 @@ def render():
         image = pasted_image.convert("RGB")
 
     if image is not None:
-        st.image(image, caption="Image ready for extraction", use_container_width=True)
-        if st.button("Extract data", type="primary", use_container_width=True):
-            with st.spinner("Reading image and detecting text…"):
-                try:
-                    rows = visual_rows(engine()(np.array(image)))
-                    frame = make_frame(rows, mode)
-                    st.session_state["image_ocr_frame"] = frame
-                    st.session_state["image_ocr_raw"] = "\n".join("\t".join(r) for r in rows)
-                    st.session_state["image_ocr_name"] = source_name
-                except Exception as exc:
-                    st.error(f"OCR failed: {type(exc).__name__}: {exc}")
+        preview_col, action_col = st.columns([2, 1], vertical_alignment="center")
+        with preview_col:
+            st.image(image, caption="Image ready for extraction", use_container_width=True)
+        with action_col:
+            st.markdown("#### Ready to extract")
+            st.write(f"Image dimensions: **{image.width:,} × {image.height:,} px**")
+            st.caption("For best results, use a sharp image with clear column spacing.")
+            if st.button("Extract data", type="primary", use_container_width=True, key="image_extract_button"):
+                with st.spinner("Reading image and detecting table structure…"):
+                    try:
+                        rows = visual_rows(engine()(np.array(image)))
+                        frame = make_frame(rows, mode)
+                        st.session_state["image_ocr_frame"] = frame
+                        st.session_state["image_ocr_raw"] = "\\n".join("\\t".join(r) for r in rows)
+                        st.session_state["image_ocr_name"] = source_name
+                        st.session_state["image_ocr_editor"] = frame
+                    except Exception as exc:
+                        st.error(f"OCR failed: {type(exc).__name__}: {exc}")
 
     frame = st.session_state.get("image_ocr_frame")
     if isinstance(frame, pd.DataFrame):
         st.divider()
-        st.subheader("Extracted data")
-        st.caption(f"{len(frame):,} rows · {len(frame.columns):,} columns. Review and edit before exporting.")
-        edited = st.data_editor(frame, num_rows="dynamic", use_container_width=True, key="image_ocr_editor")
+        head_left, head_right = st.columns([3, 1], vertical_alignment="center")
+        with head_left:
+            st.markdown("### Extracted data")
+            st.caption(f"{len(frame):,} rows · {len(frame.columns):,} columns · Editable preview")
+        with head_right:
+            st.markdown('<div class="result-status">✓ Extraction complete</div>', unsafe_allow_html=True)
+        edited = st.data_editor(
+            frame, num_rows="dynamic", use_container_width=True,
+            key="image_ocr_editor",
+            column_config={column: st.column_config.TextColumn(column) for column in frame.columns},
+        )
         stem = re.sub(r"[^A-Za-z0-9_-]+", "_", st.session_state.get("image_ocr_name", "image"))[:48] or "image"
+        st.markdown("#### Export your data")
         a, b, c, d = st.columns(4)
-        a.download_button("Download Excel", xlsx_bytes(edited), f"{stem}.xlsx",
+        a.download_button("↓  Excel (.xlsx)", xlsx_bytes(edited), f"{stem}.xlsx",
                           "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
                           type="primary", use_container_width=True)
-        b.download_button("Download CSV", edited.to_csv(index=False).encode("utf-8-sig"),
+        b.download_button("↓  CSV", edited.to_csv(index=False).encode("utf-8-sig"),
                           f"{stem}.csv", "text/csv", use_container_width=True)
-        c.download_button("Download text", edited.to_csv(index=False, sep="\t").encode("utf-8"),
+        c.download_button("↓  Text", edited.to_csv(index=False, sep="\\t").encode("utf-8"),
                           f"{stem}.txt", "text/plain", use_container_width=True)
-        d.download_button("Raw OCR text", st.session_state.get("image_ocr_raw", "").encode("utf-8"),
+        d.download_button("↓  Raw OCR", st.session_state.get("image_ocr_raw", "").encode("utf-8"),
                           f"{stem}_raw.txt", "text/plain", use_container_width=True)
-    else:
-        st.info("Your extracted table will appear here. OCR works best on clear, high-resolution images. Review figures before using exported data.")
