@@ -1,14 +1,14 @@
 [theme]
-base = "light"
-primaryColor = "#8424E8"
-backgroundColor = "#F5F7FC"
-secondaryBackgroundColor = "#FFFFFF"
-textColor = "#171923"
+base = "dark"
+primaryColor = "#A855F7"
+backgroundColor = "#090D16"
+secondaryBackgroundColor = "#111827"
+textColor = "#F1F5F9"
 font = "sans serif"
 headingFont = "sans serif"
 codeFont = "monospace"
-baseRadius = "0.65rem"
-borderColor = "#E7E9F0"
+baseRadius = "0.75rem"
+borderColor = "#273449"
 showWidgetBorder = true
 
 [server]
