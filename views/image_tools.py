@@ -101,18 +101,15 @@ def render():
     st.markdown("""
     <style>
       .block-container {max-width:1180px; padding-top:1.7rem; padding-bottom:3rem;}
-      .converter-heading {text-align:center; margin:0 auto 1.05rem auto;}
+      .converter-heading {text-align:center; margin:0 auto 1.2rem auto;}
       .converter-heading h1 {font-size:2rem; font-weight:650; margin:0 0 .35rem 0; color:var(--text-color);}
       .converter-heading p {font-size:1.05rem; margin:0; color:var(--text-color); opacity:.82;}
-      .upload-shell {background:var(--secondary-background-color); border:1px solid rgba(120,120,140,.13);
-        border-radius:18px; padding:16px; box-shadow:0 8px 22px rgba(20,20,40,.05);}
-      .upload-inner {border:2px dashed #e7d2ff; border-radius:13px; min-height:235px;
-        padding:26px 20px 12px 20px; text-align:center; background:rgba(255,255,255,.24);}
-      .upload-title {font-size:1.08rem; font-weight:600; margin:10px 0 5px 0;}
-      .upload-subtitle {font-size:.88rem; color:#9299a8; margin-bottom:14px;}
-      .privacy-note {font-size:.78rem; color:#9299a8; font-style:italic; margin:18px 0 0 0;}
-      div[data-testid="stFileUploader"] {max-width:650px; margin:0 auto;}
-      div[data-testid="stFileUploader"] section {border:0 !important; padding:0 !important; background:transparent !important;}
+      div[data-testid="stFileUploader"] {max-width:100%; margin:0 auto; padding:20px 18px;
+        background:var(--secondary-background-color); border:1px solid rgba(120,120,140,.13);
+        border-radius:18px; box-shadow:0 8px 22px rgba(20,20,40,.05);}
+      div[data-testid="stFileUploader"] section {border:2px dashed #e7d2ff !important;
+        border-radius:13px !important; padding:26px 20px !important;
+        background:rgba(255,255,255,.24) !important; min-height:210px;}
       div[data-testid="stFileUploader"] section > div {justify-content:center;}
       div[data-testid="stFileUploader"] button {background:#8424e8 !important; color:white !important;
         border:1px solid #8424e8 !important; border-radius:9px !important; padding:.55rem 1.5rem !important;}
@@ -122,23 +119,20 @@ def render():
       div[data-testid="stRadio"] label {border:1px solid rgba(130,130,150,.22); border-radius:10px;
         padding:8px 13px; background:var(--secondary-background-color);}
       div[data-testid="stButton"] button {border-radius:9px;}
-      @media(max-width:640px){.converter-heading h1{font-size:1.55rem}.upload-inner{padding:18px 10px}}
+      .privacy-note {font-size:.78rem; color:#9299a8; font-style:italic; margin:10px 0 18px 0;}
+      @media(max-width:640px){.converter-heading h1{font-size:1.55rem}}
     </style>
     <div class="converter-heading">
       <h1>JPG To Excel</h1>
       <p>Easily convert images to Excel in seconds with our image to Excel converter.</p>
     </div>
-    <div class="upload-shell"><div class="upload-inner">
-      <div class="upload-title">Drag &amp; Drop, Upload or Paste image</div>
-      <div class="upload-subtitle">Supported formats: JPG, JPEG, PNG, WEBP, BMP, TIFF</div>
-    </div></div>
     """, unsafe_allow_html=True)
 
     if OCR_ERROR:
         st.error(f"Image OCR is unavailable: {OCR_ERROR}")
         return
 
-    left, right, spacer = st.columns([1, 1, 3])
+    left, right, spacer = st.columns([2, 1, 2])
     with left:
         uploaded = st.file_uploader(
             "Browse image", type=["jpg", "jpeg", "png", "webp", "bmp", "tif", "tiff"],
@@ -161,7 +155,7 @@ def render():
         key="image_extract_mode",
     )
     st.markdown(
-        '<div class="privacy-note">*Your privacy is protected. Files are processed for conversion during this session.</div>',
+        '<div class="privacy-note">*Files are processed for conversion during this session. Check extracted values before exporting.</div>',
         unsafe_allow_html=True
     )
 
