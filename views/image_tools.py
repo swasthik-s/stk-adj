@@ -22,7 +22,7 @@ def render():
     st.caption("Drop an image, browse for a file, or paste a screenshot from your clipboard. Extracted rows can be exported to Excel, CSV or text.")
     if OCR_ERROR:
         st.error(f"Image OCR is unavailable: {OCR_ERROR}")
-        st.stop()
+        return
     @st.cache_resource(show_spinner=False)
     def engine():
         return RapidOCR()
