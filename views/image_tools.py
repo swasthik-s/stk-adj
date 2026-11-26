@@ -1,4 +1,5 @@
-"""Image to Excel with local OCR and a streamlined upload interface."""
+"""Image to Excel with local OCR and clipboard-assisted image input."""
+import base64
 import io
 import re
 from pathlib import Path
@@ -107,25 +108,37 @@ def render():
         st.error(f"Image OCR is unavailable: {OCR_ERROR}")
         return
 
-    upload_col, paste_col = st.columns([3, 1], vertical_alignment="center")
-    with upload_col:
-        uploaded = st.file_uploader(
-            "Drag & drop, upload or browse an image",
-            type=["jpg", "jpeg", "png", "webp", "bmp", "tif", "tiff", "gif", "jfif", "heic"],
-            key="image_file_upload",
-            help="JPG, PNG, WEBP, BMP and TIFF are supported. HEIC depends on Pillow's installed codecs.",
-        )
+    uploaded = st.file_uploader(
+        "Drop an image here or browse files",
+        type=["jpg", "jpeg", "png", "webp", "bmp", "tif", "tiff", "gif", "jfif", "heic"],
+        key="image_file_upload_v2",
+        help="Supported: JPG, JPEG, PNG, WEBP, BMP, TIFF and GIF. HEIC depends on installed Pillow codecs.",
+    )
+
     pasted_image = None
-    with paste_col:
-        st.markdown('<div class="paste-label">CLIPBOARD</div>', unsafe_allow_html=True)
-        if paste_image_button:
+    if paste_image_button:
+        st.markdown('<div class="paste-zone">', unsafe_allow_html=True)
+        left, center, right = st.columns([1, 1.4, 1])
+        with center:
             try:
-                pasted = paste_image_button("Paste image", key="paste_image")
+                pasted = paste_image_button(
+                    "Paste image from clipboard",
+                    text_color="#ffffff",
+                    background_color="#9333ea",
+                    hover_background_color="#7e22ce",
+                    key="paste_image_centered_v2",
+                    errors="raise",
+                )
                 pasted_image = getattr(pasted, "image_data", None)
-            except Exception:
-                st.caption("Paste is not available in this browser.")
-        else:
-            st.caption("Paste component unavailable")
+            except Exception as exc:
+                st.warning(f"Clipboard access is unavailable: {exc}")
+        st.markdown(
+            '<div class="paste-zone-note">Copy an image first, then select Paste image from clipboard. '
+            'Clipboard access requires HTTPS and browser permission.</div></div>',
+            unsafe_allow_html=True,
+        )
+    else:
+        st.info("Clipboard paste is unavailable. You can still upload an image above.")
 
     mode = st.radio(
         "Extraction mode",
@@ -134,7 +147,7 @@ def render():
         captions=["Only tabular data", "Tables, headings and text"],
         key="image_extract_mode",
     )
-    st.caption("Your image is processed by OCR in this app. Review extracted values before using them.")
+    st.caption("Image processing runs locally in this app. Review extracted values before exporting.")
 
     image = None
     source_name = "pasted_image"
@@ -148,20 +161,21 @@ def render():
         image = pasted_image.convert("RGB")
 
     if image is not None:
-        preview_col, action_col = st.columns([2, 1], vertical_alignment="center")
+        st.markdown("#### Image preview")
+        preview_col, details_col = st.columns([1.5, 1], vertical_alignment="center")
         with preview_col:
-            st.image(image, caption="Image ready for extraction", use_container_width=True)
-        with action_col:
-            st.markdown("#### Ready to extract")
-            st.write(f"Image dimensions: **{image.width:,} × {image.height:,} px**")
-            st.caption("For best results, use a sharp image with clear column spacing.")
-            if st.button("Extract data", type="primary", use_container_width=True, key="image_extract_button"):
+            st.image(image, use_container_width=True)
+        with details_col:
+            st.markdown("**Ready to extract**")
+            st.write(f"{image.width:,} × {image.height:,} pixels")
+            st.caption("For best results, use a sharp, well-lit image with visible column spacing.")
+            if st.button("Extract data", type="primary", use_container_width=True, key="image_extract_button_v2"):
                 with st.spinner("Reading image and detecting table structure…"):
                     try:
                         rows = visual_rows(engine()(np.array(image)))
                         frame = make_frame(rows, mode)
                         st.session_state["image_ocr_frame"] = frame
-                        st.session_state["image_ocr_raw"] = "\\n".join("\\t".join(r) for r in rows)
+                        st.session_state["image_ocr_raw"] = "\n".join("\t".join(r) for r in rows)
                         st.session_state["image_ocr_name"] = source_name
                         st.session_state["image_ocr_editor"] = frame
                     except Exception as exc:
@@ -178,18 +192,18 @@ def render():
             st.markdown('<div class="result-status">✓ Extraction complete</div>', unsafe_allow_html=True)
         edited = st.data_editor(
             frame, num_rows="dynamic", use_container_width=True,
-            key="image_ocr_editor",
+            key="image_ocr_editor_v2",
             column_config={column: st.column_config.TextColumn(column) for column in frame.columns},
         )
         stem = re.sub(r"[^A-Za-z0-9_-]+", "_", st.session_state.get("image_ocr_name", "image"))[:48] or "image"
         st.markdown("#### Export your data")
         a, b, c, d = st.columns(4)
-        a.download_button("↓  Excel (.xlsx)", xlsx_bytes(edited), f"{stem}.xlsx",
+        a.download_button("Excel (.xlsx)", xlsx_bytes(edited), f"{stem}.xlsx",
                           "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
                           type="primary", use_container_width=True)
-        b.download_button("↓  CSV", edited.to_csv(index=False).encode("utf-8-sig"),
+        b.download_button("CSV", edited.to_csv(index=False).encode("utf-8-sig"),
                           f"{stem}.csv", "text/csv", use_container_width=True)
-        c.download_button("↓  Text", edited.to_csv(index=False, sep="\\t").encode("utf-8"),
+        c.download_button("Text", edited.to_csv(index=False, sep="\t").encode("utf-8"),
                           f"{stem}.txt", "text/plain", use_container_width=True)
-        d.download_button("↓  Raw OCR", st.session_state.get("image_ocr_raw", "").encode("utf-8"),
+        d.download_button("Raw OCR", st.session_state.get("image_ocr_raw", "").encode("utf-8"),
                           f"{stem}_raw.txt", "text/plain", use_container_width=True)
