@@ -79,6 +79,14 @@ hr {border-color:var(--border)!important;}
 div[data-testid="stRadio"] [role="radiogroup"] {gap:10px;}
 div[data-testid="stRadio"] label {background:var(--surface);border:1px solid var(--border);border-radius:10px;padding:9px 13px;}
 .caption, [data-testid="stCaptionContainer"] {color:var(--muted)!important;}
+
+.tool-heading {display:flex;align-items:center;gap:14px;padding:20px 0 16px;}
+.tool-icon {width:46px;height:46px;border-radius:14px;display:grid;place-items:center;background:var(--accent-soft);color:var(--accent);font-size:25px;font-weight:700;}
+.tool-heading h2 {font-size:23px;margin:0 0 4px;font-weight:800;}
+.tool-heading p {margin:0;color:var(--muted);font-size:13px;}
+.paste-label {font-size:10px;font-weight:800;letter-spacing:1.4px;color:var(--muted);margin:0 0 8px;}
+.result-status {display:inline-flex;align-items:center;gap:6px;border:1px solid rgba(22,163,74,.25);background:rgba(22,163,74,.09);color:#16a34a;border-radius:999px;padding:7px 11px;font-size:12px;font-weight:700;}
+
 @media(max-width:700px) {
  .block-container {padding-left:1rem;padding-right:1rem;padding-top:.7rem;}
  .brand-subtitle {display:none;}
